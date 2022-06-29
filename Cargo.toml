@@ -13,3 +13,4 @@ bincode = "1.3.3"
 solana-sdk = "1.11.1"
 serde = { version = "1.0.137", features = ["derive"] }
 indicatif = "0.17.0-rc.11"
+memmap2 = "0.5.4"

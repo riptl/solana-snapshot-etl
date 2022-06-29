@@ -2240,6 +2240,7 @@ dependencies = [
  "env_logger",
  "indicatif",
  "log",
+ "memmap2",
  "serde",
  "solana-runtime",
  "solana-sdk",

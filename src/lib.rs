@@ -1,6 +1,5 @@
 use indicatif::{ProgressBar, ProgressStyle};
 use log::debug;
-use solana_runtime::append_vec::{AppendVec, AppendVecAccountsIter};
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -10,12 +9,14 @@ use std::str::FromStr;
 use std::time::Instant;
 use thiserror::Error;
 
+mod append_vec;
+pub mod solana;
+
+use crate::append_vec::{AppendVec, AppendVecAccountsIter};
 use crate::solana::{
     deserialize_from, AccountsDbFields, DeserializableVersionedBank,
     SerializableAccountStorageEntry,
 };
-
-mod solana;
 
 const SNAPSHOTS_DIR: &str = "snapshots";
 
