@@ -1,10 +1,9 @@
-use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::debug;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
@@ -48,6 +47,16 @@ impl UnpackedSnapshotLoader {
     where
         P: AsRef<Path>,
     {
+        Self::open_with_progress(path, Box::new(NullReadProgressTracking {}))
+    }
+
+    pub fn open_with_progress<P>(
+        path: P,
+        progress_tracking: Box<dyn ReadProgressTracking>,
+    ) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
         let path = path.as_ref();
 
         let snapshots_dir = path.join(SNAPSHOTS_DIR);
@@ -58,25 +67,21 @@ impl UnpackedSnapshotLoader {
 
         let snapshot_files = snapshots_dir.read_dir()?;
 
-        let snapshot_file = snapshot_files
+        let snapshot_file_path = snapshot_files
             .filter_map(|entry| entry.ok())
             .find(|entry| u64::from_str(&entry.file_name().to_string_lossy()).is_ok())
             .map(|entry| entry.path().join(entry.file_name()))
             .ok_or(SnapshotError::NoSnapshotManifest)?;
 
-        debug!("Opening snapshot manifest: {:?}", &snapshot_file);
-        let snapshot_file = OpenOptions::new().read(true).open(snapshot_file)?;
+        debug!("Opening snapshot manifest: {:?}", &snapshot_file_path);
+        let snapshot_file = OpenOptions::new().read(true).open(&snapshot_file_path)?;
         let snapshot_file_len = snapshot_file.metadata()?.len();
 
-        let pb = ProgressBar::new(snapshot_file_len).with_style(
-            ProgressStyle::with_template(
-                "{spinner:.green} [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
-            )
-            .unwrap()
-            .progress_chars("#>-"),
+        let snapshot_file = progress_tracking.new_read_progress_tracker(
+            &snapshot_file_path,
+            Box::new(snapshot_file),
+            snapshot_file_len,
         );
-        let snapshot_file = pb.wrap_read(snapshot_file);
-
         let mut snapshot_file = BufReader::new(snapshot_file);
 
         let pre_unpack = Instant::now();
@@ -87,8 +92,6 @@ impl UnpackedSnapshotLoader {
         let accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry> =
             deserialize_from(&mut snapshot_file)?;
         let accounts_db_fields_post_time = Instant::now();
-
-        pb.finish();
 
         debug!(
             "Read bank fields in {:?}",
@@ -105,10 +108,7 @@ impl UnpackedSnapshotLoader {
         })
     }
 
-    pub fn iter(
-        &self,
-    ) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_
-    {
+    pub fn iter(&self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
         std::iter::once(self.iter_streams())
             .flatten_ok()
             .flatten_ok()
@@ -137,9 +137,7 @@ impl UnpackedSnapshotLoader {
             .get(&slot)
             .map(|v| &v[..])
             .unwrap_or(&[]);
-        let known_vec = known_vecs
-            .iter()
-            .find(|entry| entry.id == (id as usize));
+        let known_vec = known_vecs.iter().find(|entry| entry.id == (id as usize));
         let known_vec = match known_vec {
             None => return Err(SnapshotError::UnexpectedAppendVec),
             Some(v) => v,
@@ -193,5 +191,22 @@ impl StoredAccountMetaHandle {
 
     pub fn access(&self) -> Option<StoredAccountMeta<'_>> {
         Some(self.append_vec.get_account(self.offset)?.0)
+    }
+}
+
+pub trait ReadProgressTracking {
+    fn new_read_progress_tracker(
+        &self,
+        path: &Path,
+        rd: Box<dyn Read>,
+        file_len: u64,
+    ) -> Box<dyn Read>;
+}
+
+struct NullReadProgressTracking {}
+
+impl ReadProgressTracking for NullReadProgressTracking {
+    fn new_read_progress_tracker(&self, _: &Path, rd: Box<dyn Read>, _: u64) -> Box<dyn Read> {
+        rd
     }
 }
