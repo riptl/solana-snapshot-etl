@@ -1,5 +1,6 @@
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
+use serde::Serialize;
 use solana_snapshot_etl::{ReadProgressTracking, UnpackedSnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::Path;
@@ -8,6 +9,8 @@ use std::path::Path;
 #[clap(author, version, about, long_about = None)]
 struct Args {
     path: String,
+    #[clap(long, action)]
+    csv: bool,
 }
 
 fn main() {
@@ -22,10 +25,21 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let loader =
         UnpackedSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
-    for account in loader.iter() {
-        let account = account?;
-        let account = account.access().unwrap();
-        println!("  {}", account.meta.pubkey);
+    if args.csv {
+        let mut writer = csv::Writer::from_writer(std::io::stdout());
+        for account in loader.iter() {
+            let account = account?;
+            let account = account.access().unwrap();
+            let record = CSVRecord {
+                pubkey: account.meta.pubkey.to_string(),
+                owner: account.account_meta.owner.to_string(),
+                data_len: account.meta.data_len,
+                lamports: account.account_meta.lamports,
+            };
+            if writer.serialize(record).is_err() {
+                std::process::exit(1); // if stdout closes, silently exit
+            }
+        }
     }
     Ok(())
 }
@@ -80,4 +94,12 @@ impl Read for LoadProgressTracker {
     fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
         self.rd.read_exact(buf)
     }
+}
+
+#[derive(Serialize)]
+struct CSVRecord {
+    pubkey: String,
+    owner: String,
+    data_len: u64,
+    lamports: u64,
 }
