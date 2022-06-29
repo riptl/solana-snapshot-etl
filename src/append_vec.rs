@@ -17,7 +17,7 @@
 
 use {
     log::*,
-    memmap2::Mmap,
+    memmap2::{Mmap, MmapMut},
     serde::{Deserialize, Serialize},
     solana_sdk::{
         account::{Account, AccountSharedData, ReadableAccount},
@@ -28,9 +28,9 @@ use {
     std::{
         convert::TryFrom,
         fs::OpenOptions,
-        io, mem,
+        io::{self, Read},
+        mem,
         path::Path,
-        sync::atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -128,7 +128,7 @@ pub struct AppendVec {
     map: Mmap,
 
     /// The number of bytes used to store items, not the number of items.
-    current_len: AtomicUsize,
+    current_len: usize,
 
     /// The number of bytes available for storing items.
     file_size: u64,
@@ -165,7 +165,7 @@ impl AppendVec {
     }
 
     pub fn len(&self) -> usize {
-        self.current_len.load(Ordering::Acquire)
+        self.current_len
     }
 
     pub fn is_empty(&self) -> bool {
@@ -197,11 +197,21 @@ impl AppendVec {
 
         let new = AppendVec {
             map,
-            current_len: AtomicUsize::new(current_len),
+            current_len,
             file_size,
         };
 
         Ok(new)
+    }
+
+    pub fn new_from_reader<R: Read>(reader: &mut R, current_len: usize) -> io::Result<Self> {
+        let mut map = MmapMut::map_anon(current_len)?;
+        io::copy(reader, &mut map.as_mut())?;
+        Ok(AppendVec {
+            map: map.make_read_only()?,
+            current_len,
+            file_size: current_len as u64,
+        })
     }
 
     /// Get a reference to the data at `offset` of `size` bytes if that slice

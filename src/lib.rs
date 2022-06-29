@@ -2,7 +2,7 @@ use itertools::Itertools;
 use log::debug;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
 use std::ffi::OsString;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -37,6 +37,7 @@ pub enum SnapshotError {
 
 type Result<T> = std::result::Result<T, SnapshotError>;
 
+/// Loads account data from snapshots that were unarchived to a file system.
 pub struct UnpackedSnapshotLoader {
     root: PathBuf,
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
@@ -47,7 +48,7 @@ impl UnpackedSnapshotLoader {
     where
         P: AsRef<Path>,
     {
-        Self::open_with_progress(path, Box::new(NullReadProgressTracking {}))
+        Self::open_inner(path.as_ref(), Box::new(NullReadProgressTracking {}))
     }
 
     pub fn open_with_progress<P>(
@@ -57,8 +58,10 @@ impl UnpackedSnapshotLoader {
     where
         P: AsRef<Path>,
     {
-        let path = path.as_ref();
+        Self::open_inner(path.as_ref(), progress_tracking)
+    }
 
+    fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
         let snapshots_dir = path.join(SNAPSHOTS_DIR);
         let status_cache = snapshots_dir.join(SNAPSHOT_STATUS_CACHE_FILENAME);
         if !status_cache.is_file() {
@@ -147,6 +150,38 @@ impl UnpackedSnapshotLoader {
             path,
             known_vec.accounts_current_len,
         )?)
+    }
+}
+
+/// Loads account data from a .tar.zst stream.
+pub struct ArchiveSnapshotLoader {}
+
+impl ArchiveSnapshotLoader {
+    pub fn open<P>(path: P) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        Self::open_inner(path.as_ref(), Box::new(NullReadProgressTracking {}))
+    }
+
+    pub fn open_with_progress<P>(
+        path: P,
+        progress_tracking: Box<dyn ReadProgressTracking>,
+    ) -> Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        Self::open_inner(path.as_ref(), progress_tracking)
+    }
+
+    fn open_inner(path: &Path, _progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
+        let file = File::open(path)?;
+        let compressed_stream = BufReader::new(file);
+        let tar_stream = zstd::stream::read::Decoder::new(compressed_stream)?;
+        let mut file_stream = tar::Archive::new(tar_stream);
+        let _file_entries = file_stream.entries()?;
+
+        unimplemented!("TODO ArchiveSnapshotLoader");
     }
 }
 

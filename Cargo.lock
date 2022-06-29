@@ -2292,7 +2292,9 @@ dependencies = [
  "serde",
  "solana-runtime",
  "solana-sdk",
+ "tar",
  "thiserror",
+ "zstd",
 ]
 
 [[package]]
