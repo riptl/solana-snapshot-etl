@@ -1,12 +1,15 @@
+use clap::App;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::debug;
 use ouroboros::self_referencing;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
 use thiserror::Error;
@@ -36,13 +39,15 @@ pub enum SnapshotError {
     UnexpectedAppendVec,
 }
 
+type Result<T> = std::result::Result<T, SnapshotError>;
+
 pub struct UnpackedSnapshotLoader {
     root: PathBuf,
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
 }
 
 impl UnpackedSnapshotLoader {
-    pub fn open<P>(path: P) -> Result<Self, SnapshotError>
+    pub fn open<P>(path: P) -> Result<Self>
     where
         P: AsRef<Path>,
     {
@@ -104,17 +109,18 @@ impl UnpackedSnapshotLoader {
         })
     }
 
-    fn iter(&self) -> Result<UnpackedSnapshotLoaderIter<'_, impl Iterator<Item = Result<OwnedAppendVecAccountsIter, SnapshotError>> + '_>, SnapshotError> {
-        let streams = self.iter_streams()?;
-        UnpackedSnapshotLoaderIter::new(self, streams)
+    pub fn iter(
+        &self,
+    ) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_
+    {
+        std::iter::once(self.iter_streams())
+            .flatten_ok()
+            .flatten_ok()
+            .map_ok(|stream| append_vec_iter(Rc::new(stream)))
+            .flatten_ok()
     }
 
-    fn iter_streams(
-        &self,
-    ) -> Result<
-        impl Iterator<Item = Result<OwnedAppendVecAccountsIter, SnapshotError>> + '_,
-        SnapshotError,
-    > {
+    fn iter_streams(&self) -> Result<impl Iterator<Item = Result<AppendVec>> + '_> {
         let accounts_dir = self.root.join("accounts");
         Ok(accounts_dir
             .read_dir()?
@@ -124,16 +130,11 @@ impl UnpackedSnapshotLoader {
                 parse_append_vec_name(&f.file_name()).map(move |parsed| (parsed, name))
             })
             .map(move |((slot, version), name)| {
-                self.stream_log(slot, version, &accounts_dir.join(name))
+                self.open_append_vec(slot, version, &accounts_dir.join(name))
             }))
     }
 
-    fn stream_log(
-        &self,
-        slot: u64,
-        id: u64,
-        path: &Path,
-    ) -> Result<OwnedAppendVecAccountsIter, SnapshotError> {
+    fn open_append_vec(&self, slot: u64, id: u64, path: &Path) -> Result<AppendVec> {
         let known_vecs = self
             .accounts_db_fields
             .0
@@ -149,12 +150,10 @@ impl UnpackedSnapshotLoader {
             Some(v) => v,
         };
 
-        let entries = AppendVec::new_from_file(path, known_vec.accounts_current_len)?;
-        Ok(OwnedAppendVecAccountsIterBuilder {
-            entries,
-            iterator_builder: |entries| AppendVecAccountsIter::new(entries),
-        }
-        .build())
+        Ok(AppendVec::new_from_file(
+            path,
+            known_vec.accounts_current_len,
+        )?)
     }
 }
 
@@ -169,54 +168,35 @@ fn parse_append_vec_name(name: &OsString) -> Option<(u64, u64)> {
     }
 }
 
-#[self_referencing]
-pub struct OwnedAppendVecAccountsIter {
-    entries: AppendVec,
-    #[borrows(entries)]
-    #[not_covariant]
-    pub(crate) iterator: AppendVecAccountsIter<'this>,
-}
-
-pub struct UnpackedSnapshotLoaderIter<'a, T>
-    where T: Iterator<Item = Result<OwnedAppendVecAccountsIter, SnapshotError>> + 'a
-{
-    loader: &'a UnpackedSnapshotLoader,
-    streams: T,
-    iterator: Option<OwnedAppendVecAccountsIter>
-}
-
-impl<'a, T> UnpackedSnapshotLoaderIter<'a, T>
-    where T: Iterator<Item = Result<OwnedAppendVecAccountsIter, SnapshotError>> + 'a
-{
-    fn new(loader: &'a UnpackedSnapshotLoader, mut streams: T) -> Result<Self, SnapshotError> {
-        let iterator = streams.next().map_or(Ok(None), |v| v.map(Some))?;
-        Ok(UnpackedSnapshotLoaderIter { loader, streams, iterator })
-    }
-}
-
-impl<'a, T> Iterator for UnpackedSnapshotLoaderIter<'a, T>
-    where T: Iterator<Item = Result<OwnedAppendVecAccountsIter, SnapshotError>> + 'a
-{
-    type Item = Result<StoredAccountMeta<'a>, SnapshotError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // Get next item of current stream.
-        let mut stream = self.iterator?;
-        if let Some(item) = stream.with_iterator_mut(|v| v.next()) {
-            return Some(Ok(item))
-        }
-        // End of stream reached.
-        self.iterator = None;
-        // Get next iterator.
-        match self.streams.next() {
-            None => None, // Done
-            Some(Err(e)) => return Some(Err(e)), // Trip on error
-            Some(Ok(mut v)) => {
-                // Start next iterator.
-                let item = v.with_iterator_mut(|v| v.next().map(|x| Ok(x)));
-                self.iterator = Some(v);
-                item
+fn append_vec_iter(append_vec: Rc<AppendVec>) -> impl Iterator<Item = StoredAccountMetaHandle> {
+    let mut offsets = Vec::<usize>::new();
+    let mut offset = 0usize;
+    loop {
+        match append_vec.get_account(offset) {
+            None => break,
+            Some((_, next_offset)) => {
+                offsets.push(offset);
+                offset = next_offset;
             }
         }
+    }
+    let append_vec = Rc::clone(&append_vec);
+    offsets
+        .into_iter()
+        .map(move |offset| StoredAccountMetaHandle::new(Rc::clone(&append_vec), offset))
+}
+
+pub struct StoredAccountMetaHandle {
+    append_vec: Rc<AppendVec>,
+    offset: usize,
+}
+
+impl StoredAccountMetaHandle {
+    pub fn new(append_vec: Rc<AppendVec>, offset: usize) -> StoredAccountMetaHandle {
+        Self { append_vec, offset }
+    }
+
+    pub fn access(&self) -> Option<StoredAccountMeta<'_>> {
+        Some(self.append_vec.get_account(self.offset)?.0)
     }
 }

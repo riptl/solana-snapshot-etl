@@ -18,6 +18,10 @@ fn main() {
 fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let loader = UnpackedSnapshotLoader::open(&args.path)?;
-    loader.foo();
+    for account in loader.iter() {
+        let account = account?;
+        let account = account.access().unwrap();
+        println!("  {}", account.meta.pubkey);
+    }
     Ok(())
 }
