@@ -2242,7 +2242,6 @@ dependencies = [
  "itertools",
  "log",
  "memmap2",
- "ouroboros",
  "serde",
  "solana-runtime",
  "solana-sdk",

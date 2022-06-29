@@ -1,10 +1,7 @@
-use clap::App;
 use indicatif::{ProgressBar, ProgressStyle};
 use itertools::Itertools;
 use log::debug;
-use ouroboros::self_referencing;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
-use std::cell::RefCell;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::BufReader;
@@ -17,7 +14,7 @@ use thiserror::Error;
 mod append_vec;
 pub mod solana;
 
-use crate::append_vec::{AppendVec, AppendVecAccountsIter, StoredAccountMeta};
+use crate::append_vec::{AppendVec, StoredAccountMeta};
 use crate::solana::{
     deserialize_from, AccountsDbFields, DeserializableVersionedBank,
     SerializableAccountStorageEntry,
@@ -63,8 +60,7 @@ impl UnpackedSnapshotLoader {
 
         let snapshot_file = snapshot_files
             .filter_map(|entry| entry.ok())
-            .filter(|entry| u64::from_str(&entry.file_name().to_string_lossy()).is_ok())
-            .next()
+            .find(|entry| u64::from_str(&entry.file_name().to_string_lossy()).is_ok())
             .map(|entry| entry.path().join(entry.file_name()))
             .ok_or(SnapshotError::NoSnapshotManifest)?;
 
@@ -143,8 +139,7 @@ impl UnpackedSnapshotLoader {
             .unwrap_or(&[]);
         let known_vec = known_vecs
             .iter()
-            .filter(|entry| entry.id == (id as usize))
-            .next();
+            .find(|entry| entry.id == (id as usize));
         let known_vec = match known_vec {
             None => return Err(SnapshotError::UnexpectedAppendVec),
             Some(v) => v,

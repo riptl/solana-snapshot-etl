@@ -14,5 +14,4 @@ solana-sdk = "1.11.1"
 serde = { version = "1.0.137", features = ["derive"] }
 indicatif = "0.17.0-rc.11"
 memmap2 = "0.5.4"
-ouroboros = "0.15.0"
 itertools = "0.10.3"
