@@ -17,19 +17,18 @@
 
 use {
     log::*,
-    memmap2::MmapMut,
+    memmap2::Mmap,
     serde::{Deserialize, Serialize},
     solana_sdk::{
         account::{Account, AccountSharedData, ReadableAccount},
-        clock::{Epoch},
+        clock::Epoch,
         hash::Hash,
         pubkey::Pubkey,
     },
     std::{
         convert::TryFrom,
         fs::OpenOptions,
-        io,
-        mem,
+        io, mem,
         path::Path,
         sync::atomic::{AtomicUsize, Ordering},
     },
@@ -118,29 +117,6 @@ impl<'a> StoredAccountMeta<'a> {
             data: self.data.to_vec(),
         })
     }
-
-    fn sanitize(&self) -> bool {
-        self.sanitize_executable() && self.sanitize_lamports()
-    }
-
-    fn sanitize_executable(&self) -> bool {
-        // Sanitize executable to ensure higher 7-bits are cleared correctly.
-        self.ref_executable_byte() & !1 == 0
-    }
-
-    fn sanitize_lamports(&self) -> bool {
-        // Sanitize 0 lamports to ensure to be same as AccountSharedData::default()
-        self.account_meta.lamports != 0 || self.clone_account() == AccountSharedData::default()
-    }
-
-    fn ref_executable_byte(&self) -> &u8 {
-        // Use extra references to avoid value silently clamped to 1 (=true) and 0 (=false)
-        // Yes, this really happens; see test_new_from_file_crafted_executable
-        let executable_bool: &bool = &self.account_meta.executable;
-        // UNSAFE: Force to interpret mmap-backed bool as u8 to really read the actual memory content
-        let executable_byte: &u8 = unsafe { &*(executable_bool as *const bool as *const u8) };
-        executable_byte
-    }
 }
 
 pub struct AppendVecAccountsIter<'a> {
@@ -176,7 +152,7 @@ impl<'a> Iterator for AppendVecAccountsIter<'a> {
 /// is appending new items.
 pub struct AppendVec {
     /// A file-backed block of memory that is used to store the data for each appended item.
-    map: MmapMut,
+    map: Mmap,
 
     /// The number of bytes used to store items, not the number of items.
     current_len: AtomicUsize,
@@ -227,10 +203,10 @@ impl AppendVec {
         self.file_size
     }
 
-    pub fn new_from_file<P: AsRef<Path>>(path: P, current_len: usize) -> io::Result<(Self, usize)> {
+    pub fn new_from_file<P: AsRef<Path>>(path: P, current_len: usize) -> io::Result<Self> {
         let data = OpenOptions::new()
             .read(true)
-            .write(true)
+            .write(false)
             .create(false)
             .open(&path)?;
 
@@ -238,7 +214,7 @@ impl AppendVec {
         AppendVec::sanitize_len_and_size(current_len, file_size as usize)?;
 
         let map = unsafe {
-            let result = MmapMut::map_mut(&data);
+            let result = Mmap::map(&data);
             if result.is_err() {
                 // for vm.max_map_count, error is: {code: 12, kind: Other, message: "Cannot allocate memory"}
                 info!("memory map error: {:?}. This may be because vm.max_map_count is not set correctly.", result);
@@ -252,36 +228,7 @@ impl AppendVec {
             file_size,
         };
 
-        let (sanitized, num_accounts) = new.sanitize_layout_and_length();
-        if !sanitized {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "incorrect layout/length/data",
-            ));
-        }
-
-        Ok((new, num_accounts))
-    }
-
-    fn sanitize_layout_and_length(&self) -> (bool, usize) {
-        let mut offset = 0;
-
-        // This discards allocated accounts immediately after check at each loop iteration.
-        //
-        // This code should not reuse AppendVec.accounts() method as the current form or
-        // extend it to be reused here because it would allow attackers to accumulate
-        // some measurable amount of memory needlessly.
-        let mut num_accounts = 0;
-        while let Some((account, next_offset)) = self.get_account(offset) {
-            if !account.sanitize() {
-                return (false, num_accounts);
-            }
-            offset = next_offset;
-            num_accounts += 1;
-        }
-        let aligned_current_len = u64_align!(self.current_len.load(Ordering::Acquire));
-
-        (offset == aligned_current_len, num_accounts)
+        Ok(new)
     }
 
     /// Get a reference to the data at `offset` of `size` bytes if that slice

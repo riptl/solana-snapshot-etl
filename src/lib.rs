@@ -132,9 +132,7 @@ impl UnpackedSnapshotLoader {
             Some(v) => v,
         };
 
-        // inefficient
-        let (entries, num_accounts) =
-            AppendVec::new_from_file(path, known_vec.accounts_current_len)?;
+        let entries = AppendVec::new_from_file(path, known_vec.accounts_current_len)?;
         let iter = AppendVecAccountsIter::new(&entries);
         for entry in iter {
             println!("  {}", entry.meta.pubkey);
