@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use log::debug;
+use log::info;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
@@ -76,7 +76,7 @@ impl UnpackedSnapshotLoader {
             .map(|entry| entry.path().join(entry.file_name()))
             .ok_or(SnapshotError::NoSnapshotManifest)?;
 
-        debug!("Opening snapshot manifest: {:?}", &snapshot_file_path);
+        info!("Opening snapshot manifest: {:?}", &snapshot_file_path);
         let snapshot_file = OpenOptions::new().read(true).open(&snapshot_file_path)?;
         let snapshot_file_len = snapshot_file.metadata()?.len();
 
@@ -95,12 +95,13 @@ impl UnpackedSnapshotLoader {
         let accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry> =
             deserialize_from(&mut snapshot_file)?;
         let accounts_db_fields_post_time = Instant::now();
+        drop(snapshot_file);
 
-        debug!(
+        info!(
             "Read bank fields in {:?}",
             versioned_bank_post_time - pre_unpack
         );
-        debug!(
+        info!(
             "Read accounts DB fields in {:?}",
             accounts_db_fields_post_time - versioned_bank_post_time
         );

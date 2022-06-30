@@ -1,7 +1,7 @@
 use crate::geyser::load_plugin;
 use clap::{ArgGroup, Parser};
 use indicatif::{MultiProgress, ProgressBar, ProgressBarIter, ProgressStyle};
-use log::error;
+use log::{error, info};
 use rusqlite::params;
 use serde::Serialize;
 use solana_geyser_plugin_interface::geyser_plugin_interface::{
@@ -28,15 +28,17 @@ struct Args {
     #[clap(long, action, help = "Write CSV to stdout")]
     csv: bool,
     #[clap(long, help = "Export to new SQLite3 DB at this path")]
-    sqlite_out: String,
-    #[clap(long, help = "Index token program data")]
+    sqlite_out: Option<String>,
+    #[clap(long, action, help = "Index token program data")]
     tokens: bool,
     #[clap(long, help = "Load Geyser plugin from given config file")]
-    geyser: String,
+    geyser: Option<String>,
 }
 
 fn main() {
-    env_logger::init();
+    env_logger::init_from_env(
+        env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
+    );
     if let Err(e) = _main() {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -48,6 +50,15 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let loader =
         UnpackedSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
     if args.csv {
+        info!("Dumping to CSV");
+        let spinner_style = ProgressStyle::with_template(
+            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
+        )
+        .unwrap();
+        let accounts_spinner = ProgressBar::new_spinner()
+            .with_style(spinner_style.clone())
+            .with_prefix("accs");
+        let mut accounts_count = 0u64;
         let mut writer = csv::Writer::from_writer(std::io::stdout());
         for account in loader.iter() {
             let account = account?;
@@ -61,14 +72,30 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
             if writer.serialize(record).is_err() {
                 std::process::exit(1); // if stdout closes, silently exit
             }
+            accounts_count += 1;
+            if accounts_count % 1024 == 0 {
+                accounts_spinner.set_position(accounts_count);
+            }
         }
+        accounts_spinner.finish();
+        println!("Done!");
     }
-    if !args.geyser.is_empty() {
-        let mut plugin = unsafe { load_plugin(&args.geyser)? };
+    if let Some(geyser_config_path) = args.geyser {
+        info!("Dumping to Geyser plugin: {}", &geyser_config_path);
+        let mut plugin = unsafe { load_plugin(&geyser_config_path)? };
         assert!(
             plugin.account_data_notifications_enabled(),
             "Geyser plugin does not accept account data notifications"
         );
+        // TODO dedup spinner definitions
+        let spinner_style = ProgressStyle::with_template(
+            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
+        )
+        .unwrap();
+        let accounts_spinner = ProgressBar::new_spinner()
+            .with_style(spinner_style.clone())
+            .with_prefix("accs");
+        let mut accounts_count = 0u64;
         for account in loader.iter() {
             let account = account?;
             let account = account.access().unwrap();
@@ -87,10 +114,17 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
                 slot,
                 /* is_startup */ false,
             )?;
+            accounts_count += 1;
+            if accounts_count % 1024 == 0 {
+                accounts_spinner.set_position(accounts_count);
+            }
         }
+        accounts_spinner.finish();
+        println!("Done!");
     }
-    if !args.sqlite_out.is_empty() {
-        let db_path = PathBuf::from(args.sqlite_out);
+    if let Some(sqlite_out_path) = args.sqlite_out {
+        info!("Dumping to SQLite3: {}", &sqlite_out_path);
+        let db_path = PathBuf::from(sqlite_out_path);
         assert!(
             !db_path.exists(),
             "Refusing to overwrite database that already exists"
@@ -256,6 +290,11 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
         // Gracefully exit.
         drop(db); // close connection
         temp_file_guard.promote(db_path)?;
+
+        info!(
+            "Done! Wrote {} token accounts out of {} total",
+            token_accounts_count, accounts_count
+        );
     }
     Ok(())
 }
