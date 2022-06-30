@@ -1,3 +1,4 @@
+use borsh::BorshDeserialize;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{error, warn};
 use rusqlite::{params, Connection};
@@ -6,6 +7,8 @@ use solana_snapshot_etl::append_vec::StoredAccountMeta;
 use solana_snapshot_etl::{SnapshotError, StoredAccountMetaHandle};
 use std::iter::Iterator;
 use std::path::{Path, PathBuf};
+
+use crate::mpl_metadata;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -17,6 +20,7 @@ pub(crate) struct SqliteIndexer {
     multi_progress: MultiProgress,
     accounts_counter: ProgressCounter,
     token_accounts_counter: ProgressCounter,
+    metaplex_accounts_counter: ProgressCounter,
 }
 
 pub(crate) struct IndexStats {
@@ -37,22 +41,31 @@ impl SqliteIndexer {
 
         // Create progress bars.
         let spinner_style = ProgressStyle::with_template(
-            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
+            "{prefix:>13.bold.dim} {spinner} rate={per_sec:>13} total={human_pos:>11}",
         )
         .unwrap();
         let multi_progress = MultiProgress::new();
-        let accounts_spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(spinner_style.clone())
-                .with_prefix("accs"),
+        let accounts_counter = ProgressCounter::new(
+            multi_progress.add(
+                ProgressBar::new_spinner()
+                    .with_style(spinner_style.clone())
+                    .with_prefix("accs"),
+            ),
         );
-        let accounts_counter = ProgressCounter::new(accounts_spinner);
-        let token_accounts_spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(spinner_style)
-                .with_prefix("token_accs"),
+        let token_accounts_counter = ProgressCounter::new(
+            multi_progress.add(
+                ProgressBar::new_spinner()
+                    .with_style(spinner_style.clone())
+                    .with_prefix("token_accs"),
+            ),
         );
-        let token_accounts_counter = ProgressCounter::new(token_accounts_spinner);
+        let metaplex_accounts_counter = ProgressCounter::new(
+            multi_progress.add(
+                ProgressBar::new_spinner()
+                    .with_style(spinner_style)
+                    .with_prefix("metaplex_accs"),
+            ),
+        );
 
         Ok(Self {
             db,
@@ -62,6 +75,7 @@ impl SqliteIndexer {
             multi_progress,
             accounts_counter,
             token_accounts_counter,
+            metaplex_accounts_counter,
         })
     }
 
@@ -108,6 +122,17 @@ CREATE TABLE token_multisig (
 );",
             [],
         )?;
+        db.execute(
+            "\
+CREATE TABLE token_metadata (
+    pubkey BLOB(32) NOT NULL,
+    name TEXT(32) NOT NULL,
+    symbol TEXT(10) NOT NULL,
+    uri TEXT(200) NOT NULL,
+    seller_fee_basis_points INTEGER(4) NOT NULL
+);",
+            [],
+        )?;
         Ok(db)
     }
 
@@ -137,6 +162,9 @@ CREATE TABLE token_multisig (
         if account.account_meta.owner == spl_token::id() {
             self.insert_token(account)?;
         }
+        if account.account_meta.owner == mpl_metadata::id() {
+            self.insert_token_metadata(account)?;
+        }
         self.accounts_counter.inc();
         Ok(())
     }
@@ -144,20 +172,17 @@ CREATE TABLE token_multisig (
     fn insert_token(&mut self, account: &StoredAccountMeta) -> Result<()> {
         match account.meta.data_len as usize {
             spl_token::state::Account::LEN => {
-                let token_account = spl_token::state::Account::unpack(account.data);
-                if let Ok(token_account) = token_account {
+                if let Ok(token_account) = spl_token::state::Account::unpack(account.data) {
                     self.insert_token_account(account, &token_account)?;
                 }
             }
             spl_token::state::Mint::LEN => {
-                let token_mint = spl_token::state::Mint::unpack(account.data);
-                if let Ok(token_mint) = token_mint {
+                if let Ok(token_mint) = spl_token::state::Mint::unpack(account.data) {
                     self.insert_token_mint(account, &token_mint)?;
                 }
             }
             spl_token::state::Multisig::LEN => {
-                let token_multisig = spl_token::state::Multisig::unpack(account.data);
-                if let Ok(token_multisig) = token_multisig {
+                if let Ok(token_multisig) = spl_token::state::Multisig::unpack(account.data) {
                     self.insert_token_multisig(account, &token_multisig)?;
                 }
             }
@@ -232,6 +257,47 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
                 token_multisig.n
             ])?;
         }
+        Ok(())
+    }
+
+    fn insert_token_metadata(&mut self, account: &StoredAccountMeta) -> Result<()> {
+        if account.data.is_empty() {
+            return Ok(());
+        }
+        let account_key = match mpl_metadata::AccountKey::try_from(account.data[0]) {
+            Ok(v) => v,
+            Err(_) => return Ok(()),
+        };
+        match account_key {
+            mpl_metadata::AccountKey::MetadataV1 => {
+                if let Ok(data) = mpl_metadata::Data::try_from_slice(account.data) {
+                    self.insert_token_metadata_metadata(account, &data)?;
+                }
+            }
+            _ => return Ok(()) // TODO
+        }
+        self.metaplex_accounts_counter.inc();
+        Ok(())
+    }
+
+    fn insert_token_metadata_metadata(
+        &mut self,
+        account: &StoredAccountMeta,
+        metadata: &mpl_metadata::Data,
+    ) -> Result<()> {
+        self.db
+            .prepare_cached(
+                "\
+INSERT OR REPLACE INTO token_metadata (pubkey, name, symbol, uri, seller_fee_basis_points)
+    VALUES (?, ?, ?, ?, ?);",
+            )?
+            .insert(params![
+                account.meta.pubkey.as_ref(),
+                metadata.name,
+                metadata.symbol,
+                metadata.uri,
+                metadata.seller_fee_basis_points,
+            ])?;
         Ok(())
     }
 }

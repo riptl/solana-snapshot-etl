@@ -12,6 +12,7 @@ use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
 
 mod geyser;
+mod mpl_metadata;
 mod sqlite;
 
 #[derive(Parser, Debug)]
