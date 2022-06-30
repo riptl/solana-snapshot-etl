@@ -10,7 +10,7 @@ use std::str::FromStr;
 use std::time::Instant;
 use thiserror::Error;
 
-mod append_vec;
+pub mod append_vec;
 pub mod solana;
 
 use crate::append_vec::{AppendVec, StoredAccountMeta};

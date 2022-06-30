@@ -1,19 +1,18 @@
 use crate::geyser::load_plugin;
+use crate::sqlite::SqliteIndexer;
 use clap::{ArgGroup, Parser};
-use indicatif::{MultiProgress, ProgressBar, ProgressBarIter, ProgressStyle};
-use log::{error, info};
-use rusqlite::params;
+use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
+use log::info;
 use serde::Serialize;
 use solana_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
 };
-use solana_sdk::program_pack::Pack;
 use solana_snapshot_etl::{ReadProgressTracking, UnpackedSnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 mod geyser;
+mod sqlite;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -125,205 +124,19 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(sqlite_out_path) = args.sqlite_out {
         info!("Dumping to SQLite3: {}", &sqlite_out_path);
         let db_path = PathBuf::from(sqlite_out_path);
-        assert!(
-            !db_path.exists(),
-            "Refusing to overwrite database that already exists"
-        );
-
-        // Create temporary DB file, which gets promoted on success.
-        let temp_file_name = format!("_{}.tmp", db_path.file_name().unwrap().to_string_lossy());
-        let temp_db_path = db_path.with_file_name(&temp_file_name);
-        let _ = std::fs::remove_file(&temp_db_path);
-        let mut temp_file_guard = TempFileGuard::new(temp_db_path.clone());
-
-        // Open database.
-        let db = rusqlite::Connection::open(&temp_db_path)?;
-        db.pragma_update(None, "synchronous", false)?;
-        db.pragma_update(None, "journal_mode", "off")?;
-        db.execute(
-            "\
-CREATE TABLE token_mint (
-    pubkey BLOB(32) NOT NULL PRIMARY KEY,
-    mint_authority BLOB(32) NULL,
-    supply INTEGER(8) NOT NULL,
-    decimals INTEGER(2) NOT NULL,
-    is_initialized BOOL NOT NULL,
-    freeze_authority BLOB(32) NULL
-);",
-            [],
-        )?;
-        db.execute(
-            "\
-CREATE TABLE token_account (
-    pubkey BLOB(32) NOT NULL PRIMARY KEY,
-    mint BLOB(32) NOT NULL,
-    owner BLOB(32) NOT NULL,
-    amount INTEGER(8) NOT NULL,
-    delegate BLOB(32),
-    state INTEGER(1) NOT NULL,
-    is_native INTEGER(8),
-    delegated_amount INTEGER(8) NOT NULL,
-    close_authority BLOB(32)
-);",
-            [],
-        )?;
-        db.execute(
-            "\
-CREATE TABLE token_multisig (
-    pubkey BLOB(32) NOT NULL,
-    signer BLOB(32) NOT NULL,
-    m INTEGER(2) NOT NULL,
-    n INTEGER(2) NOT NULL,
-    PRIMARY KEY (pubkey, signer)
-);",
-            [],
-        )?;
-
-        let mut token_mint_insert = db.prepare("\
-INSERT OR REPLACE INTO token_mint (pubkey, mint_authority, supply, decimals, is_initialized, freeze_authority)
-    VALUES (?, ?, ?, ?, ?, ?);
-")?;
-        let mut token_account_insert = db.prepare("\
-INSERT OR REPLACE INTO token_account (pubkey, mint, owner, amount, delegate, state, is_native, delegated_amount, close_authority)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-")?;
-        let mut token_multisig_insert = db.prepare(
-            "\
-INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
-    VALUES (?, ?, ?, ?);
-",
-        )?;
-
-        let spinner_style = ProgressStyle::with_template(
-            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
-        )
-        .unwrap();
-
-        let multi_progress = MultiProgress::new();
-        let accounts_spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(spinner_style.clone())
-                .with_prefix("accs"),
-        );
-        accounts_spinner.enable_steady_tick(Duration::from_millis(500));
-        let token_accounts_spinner = multi_progress.add(
-            ProgressBar::new_spinner()
-                .with_style(spinner_style)
-                .with_prefix("token_accs"),
-        );
-        token_accounts_spinner.enable_steady_tick(Duration::from_millis(500));
-
-        let mut accounts_count = 0u64;
-        let mut token_accounts_count = 0u64;
-
-        for account in loader.iter() {
-            let account = account?;
-            let account = account.access().unwrap();
-            accounts_count += 1;
-            if accounts_count % 1024 == 0 {
-                accounts_spinner.set_position(accounts_count);
-            }
-            if account.account_meta.owner == spl_token::id() {
-                token_accounts_count += 1;
-                if token_accounts_count % 1024 == 0 {
-                    token_accounts_spinner.set_position(token_accounts_count);
-                }
-                match account.meta.data_len as usize {
-                    spl_token::state::Account::LEN => {
-                        let token_account = spl_token::state::Account::unpack(account.data);
-                        if let Ok(token_account) = token_account {
-                            token_account_insert.insert(params![
-                                account.meta.pubkey.as_ref(),
-                                token_account.mint.as_ref(),
-                                token_account.owner.as_ref(),
-                                token_account.amount as i64,
-                                Option::<[u8; 32]>::from(
-                                    token_account.delegate.map(|key| key.to_bytes())
-                                ),
-                                token_account.state as u8,
-                                Option::<u64>::from(token_account.is_native),
-                                token_account.delegated_amount as i64,
-                                Option::<[u8; 32]>::from(
-                                    token_account.close_authority.map(|key| key.to_bytes())
-                                ),
-                            ])?;
-                        }
-                    }
-                    spl_token::state::Mint::LEN => {
-                        let token_mint = spl_token::state::Mint::unpack(account.data);
-                        if let Ok(token_mint) = token_mint {
-                            token_mint_insert.insert(params![
-                                account.meta.pubkey.as_ref(),
-                                Option::<[u8; 32]>::from(
-                                    token_mint.mint_authority.map(|key| key.to_bytes()),
-                                ),
-                                token_mint.supply as i64,
-                                token_mint.decimals,
-                                token_mint.is_initialized,
-                                Option::<[u8; 32]>::from(
-                                    token_mint.freeze_authority.map(|key| key.to_bytes())
-                                ),
-                            ])?;
-                        }
-                    }
-                    spl_token::state::Multisig::LEN => {
-                        let token_multisig = spl_token::state::Multisig::unpack(account.data);
-                        if let Ok(token_multisig) = token_multisig {
-                            for signer in &token_multisig.signers[..token_multisig.n as usize] {
-                                token_multisig_insert.insert(params![
-                                    account.meta.pubkey.as_ref(),
-                                    signer.as_ref(),
-                                    token_multisig.m,
-                                    token_multisig.n
-                                ])?;
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+        if db_path.exists() {
+            return Err("Refusing to overwrite database that already exists".into());
         }
-        drop(token_mint_insert);
-        drop(token_account_insert);
-        drop(token_multisig_insert);
 
-        // Gracefully exit.
-        drop(db); // close connection
-        temp_file_guard.promote(db_path)?;
+        let indexer = SqliteIndexer::new(db_path)?;
+        let stats = indexer.insert_all(loader.iter())?;
 
         info!(
             "Done! Wrote {} token accounts out of {} total",
-            token_accounts_count, accounts_count
+            stats.token_accounts_total, stats.accounts_total
         );
     }
     Ok(())
-}
-
-pub struct TempFileGuard {
-    pub path: Option<PathBuf>,
-}
-
-impl TempFileGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
-    }
-
-    fn promote<P: AsRef<Path>>(&mut self, new_name: P) -> std::io::Result<()> {
-        std::fs::rename(
-            self.path.take().expect("cannot promote non-existent file"),
-            new_name,
-        )
-    }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        if let Some(path) = &self.path {
-            if let Err(e) = std::fs::remove_file(path) {
-                error!("Failed to remove temp DB: {}", e);
-            }
-        }
-    }
 }
 
 struct LoadProgressTracking {}
