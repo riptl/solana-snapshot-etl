@@ -1,12 +1,12 @@
 use clap::{ArgGroup, Parser};
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use log::error;
+use rusqlite::params;
 use serde::Serialize;
+use solana_sdk::program_pack::Pack;
 use solana_snapshot_etl::{ReadProgressTracking, UnpackedSnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
-use rusqlite::params;
-use solana_sdk::program_pack::Pack;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -16,12 +16,13 @@ use solana_sdk::program_pack::Pack;
         .args(&["csv", "sqlite-out"]),
 ))]
 struct Args {
+    #[clap(help = "Path to snapshot")]
     path: String,
-    #[clap(long, action)]
+    #[clap(long, action, help = "Write CSV to stdout")]
     csv: bool,
-    #[clap(long)]
+    #[clap(long, help = "Export to new SQLite3 DB at this path")]
     sqlite_out: String,
-    #[clap(long)]
+    #[clap(long, help = "Index token program data")]
     tokens: bool,
 }
 
@@ -63,7 +64,7 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         // Create temporary DB file, which gets promoted on success.
         let temp_file_name = format!("_{}.tmp", db_path.file_name().unwrap().to_string_lossy());
         let temp_db_path = db_path.with_file_name(&temp_file_name);
-        let _ = std::fs::remove_file(temp_db_path);
+        let _ = std::fs::remove_file(&temp_db_path);
         let mut temp_file_guard = TempFileGuard::new(temp_db_path.clone());
 
         // Open database.
@@ -71,49 +72,120 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         db.pragma_update(None, "synchronous", false)?;
         db.pragma_update(None, "journal_mode", "off")?;
         db.execute(
-            "
+            "\
+CREATE TABLE token_mint (
+    pubkey BLOB(32) NOT NULL PRIMARY KEY,
+    mint_authority BLOB(32) NULL,
+    supply INTEGER(8) NOT NULL,
+    decimals INTEGER(2) NOT NULL,
+    is_initialized BOOL NOT NULL,
+    freeze_authority BLOB(32) NULL
+);",
+            [],
+        )?;
+        db.execute(
+            "\
 CREATE TABLE token_account (
     pubkey BLOB(32) NOT NULL PRIMARY KEY,
     mint BLOB(32) NOT NULL,
     owner BLOB(32) NOT NULL,
     amount INTEGER(8) NOT NULL,
     delegate BLOB(32),
-    state INTERGER(1) NOT NULL,
+    state INTEGER(1) NOT NULL,
     is_native INTEGER(8),
     delegated_amount INTEGER(8) NOT NULL,
     close_authority BLOB(32)
 );",
             [],
         )?;
+        db.execute(
+            "\
+CREATE TABLE token_multisig (
+    pubkey BLOB(32) NOT NULL,
+    signer BLOB(32) NOT NULL,
+    m INTEGER(2) NOT NULL,
+    n INTEGER(2) NOT NULL,
+    PRIMARY KEY (pubkey, signer)
+);",
+            [],
+        )?;
 
-        // Insert all token accounts.
-        let mut token_account_insert = db.prepare("
+        let mut token_mint_insert = db.prepare("\
+INSERT OR REPLACE INTO token_mint (pubkey, mint_authority, supply, decimals, is_initialized, freeze_authority)
+    VALUES (?, ?, ?, ?, ?, ?);
+")?;
+        let mut token_account_insert = db.prepare("\
 INSERT OR REPLACE INTO token_account (pubkey, mint, owner, amount, delegate, state, is_native, delegated_amount, close_authority)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 ")?;
+        let mut token_multisig_insert = db.prepare(
+            "\
+INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
+    VALUES (?, ?, ?, ?);
+",
+        )?;
         for account in loader.iter() {
             let account = account?;
             let account = account.access().unwrap();
             if account.account_meta.owner == spl_token::id() {
-                if account.meta.data_len as usize == spl_token::state::Account::LEN {
-                    let token_account = spl_token::state::Account::unpack(account.data);
-                    if let Ok(token_account) = token_account {
-                        token_account_insert.insert(params![
-                            account.meta.pubkey.as_ref(),
-                            token_account.mint.as_ref(),
-                            token_account.owner.as_ref(),
-                            token_account.amount as i64,
-                            Option::<[u8; 32]>::from(token_account.delegate.map(|key| key.to_bytes())),
-                            token_account.state as u8,
-                            Option::<u64>::from(token_account.is_native),
-                            token_account.delegated_amount as i64,
-                            Option::<[u8; 32]>::from(token_account.close_authority.map(|key| key.to_bytes())),
-                        ])?;
+                match account.meta.data_len as usize {
+                    spl_token::state::Account::LEN => {
+                        let token_account = spl_token::state::Account::unpack(account.data);
+                        if let Ok(token_account) = token_account {
+                            token_account_insert.insert(params![
+                                account.meta.pubkey.as_ref(),
+                                token_account.mint.as_ref(),
+                                token_account.owner.as_ref(),
+                                token_account.amount as i64,
+                                Option::<[u8; 32]>::from(
+                                    token_account.delegate.map(|key| key.to_bytes())
+                                ),
+                                token_account.state as u8,
+                                Option::<u64>::from(token_account.is_native),
+                                token_account.delegated_amount as i64,
+                                Option::<[u8; 32]>::from(
+                                    token_account.close_authority.map(|key| key.to_bytes())
+                                ),
+                            ])?;
+                        }
                     }
+                    spl_token::state::Mint::LEN => {
+                        let token_mint = spl_token::state::Mint::unpack(account.data);
+                        if let Ok(token_mint) = token_mint {
+                            token_mint_insert.insert(params![
+                                account.meta.pubkey.as_ref(),
+                                Option::<[u8; 32]>::from(
+                                    token_mint.mint_authority.map(|key| key.to_bytes()),
+                                ),
+                                token_mint.supply as i64,
+                                token_mint.decimals,
+                                token_mint.is_initialized,
+                                Option::<[u8; 32]>::from(
+                                    token_mint.freeze_authority.map(|key| key.to_bytes())
+                                ),
+                            ])?;
+                        }
+                    }
+                    spl_token::state::Multisig::LEN => {
+                        let token_multisig = spl_token::state::Multisig::unpack(account.data);
+                        if let Ok(token_multisig) = token_multisig {
+                            for signer in &token_multisig.signers[..token_multisig.n as usize] {
+                                token_multisig_insert.insert(params![
+                                    account.meta.pubkey.as_ref(),
+                                    signer.as_ref(),
+                                    token_multisig.m,
+                                    token_multisig.n
+                                ])?;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
+        drop(token_mint_insert);
         drop(token_account_insert);
+        drop(token_multisig_insert);
 
         // Gracefully exit.
         drop(db); // close connection
