@@ -2,6 +2,10 @@
 name = "solana-snapshot-etl"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+documentation = "https://docs.rs/solana-snapshot-etl"
+description = "Efficiently unpack Solana snapshots"
+authors = ["Richard Patel <me@terorie.dev>"]
 
 [dependencies]
 clap = { version = "3.2.7", features = ["derive"] }

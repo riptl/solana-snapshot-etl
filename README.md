@@ -6,6 +6,8 @@
   <sub>Built with 🦀 at <em>REDACTED</em></sub>
 </div>
 
+**`solana-snapshot-etl` efficiently extracts all accounts in a snapshot** to load them into an external system.
+
 ## Motivation
 
 Solana nodes periodically backup their account database into a `.tar.zst` "snapshot" stream.
@@ -18,13 +20,13 @@ snapshot-139240745-D17vR2iksG5RoLMfTX7i5NwSsr4VpbybuX1eqzesQfu2.tar.zst
 A full snapshot file contains a copy of all accounts at a specific slot state (in this case slot `139240745`).
 
 Historical accounts data is relevant to blockchain analytics use-cases and event tracing.
-Despite archives being readily available, the ecosystem lacks an easy-to-use tool to access snapshot data.
-
-**`solana-snapshot-etl` efficiently extracts all accounts in a snapshot** to load them into an external system.
+Despite archives being readily available, the ecosystem was missing an easy-to-use tool to access snapshot data.
 
 ## Usage
 
 ### As a command-line tool
+
+The standalone command-line tool can export data to CSV, SQLite3 and Geyser plugins.
 
 Build from source.
 
