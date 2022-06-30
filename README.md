@@ -1,10 +1,6 @@
-<div align="center">
-  <h1>Solana Snapshot ETL 📸</h1>
-  <p>
-    <strong>Rust tool to efficiently unpack Solana snapshots</strong>
-  </p>
-  <sub>Built with 🦀 at <em>REDACTED</em></sub>
-</div>
+# Solana Snapshot ETL 📸
+
+<sub>Built with 🦀 at <em>REDACTED</em></sub>
 
 **`solana-snapshot-etl` efficiently extracts all accounts in a snapshot** to load them into an external system.
 
