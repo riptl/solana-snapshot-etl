@@ -26,7 +26,26 @@ Despite archives being readily available, the ecosystem lacks an easy-to-use too
 
 ### As a command-line tool
 
-TODO
+Build from source.
+
+```shell
+cargo build --release --bin solana-snapshot-etl --features-standalone
+```
+
+Unpack a snapshot.
+
+```shell
+mkdir ./unpacked_snapshot
+cd ./unpacked_snapshot
+tar -I zstd -xvf ../snapshot-139240745-D17vR2iksG5RoLMfTX7i5NwSsr4VpbybuX1eqzesQfu2.tar.zst
+```
+
+Dump all token accounts to SQLite.
+
+```shell
+cd ../
+./target/release/solana-snapshot-etl ./unpacked_snapshot --sqlite-out snapshot.db
+```
 
 ### As a library
 

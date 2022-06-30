@@ -1,5 +1,5 @@
 use clap::{ArgGroup, Parser};
-use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressBarIter, ProgressStyle};
 use log::error;
 use rusqlite::params;
 use serde::Serialize;
@@ -7,6 +7,7 @@ use solana_sdk::program_pack::Pack;
 use solana_snapshot_etl::{ReadProgressTracking, UnpackedSnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -124,10 +125,41 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
     VALUES (?, ?, ?, ?);
 ",
         )?;
+
+        let spinner_style = ProgressStyle::with_template(
+            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
+        )
+        .unwrap();
+
+        let multi_progress = MultiProgress::new();
+        let accounts_spinner = multi_progress.add(
+            ProgressBar::new_spinner()
+                .with_style(spinner_style.clone())
+                .with_prefix("accs"),
+        );
+        accounts_spinner.enable_steady_tick(Duration::from_millis(500));
+        let token_accounts_spinner = multi_progress.add(
+            ProgressBar::new_spinner()
+                .with_style(spinner_style)
+                .with_prefix("token_accs"),
+        );
+        token_accounts_spinner.enable_steady_tick(Duration::from_millis(500));
+
+        let mut accounts_count = 0u64;
+        let mut token_accounts_count = 0u64;
+
         for account in loader.iter() {
             let account = account?;
             let account = account.access().unwrap();
+            accounts_count += 1;
+            if accounts_count % 1024 == 0 {
+                accounts_spinner.set_position(accounts_count);
+            }
             if account.account_meta.owner == spl_token::id() {
+                token_accounts_count += 1;
+                if token_accounts_count % 1024 == 0 {
+                    token_accounts_spinner.set_position(token_accounts_count);
+                }
                 match account.meta.data_len as usize {
                     spl_token::state::Account::LEN => {
                         let token_account = spl_token::state::Account::unpack(account.data);
@@ -232,11 +264,12 @@ impl ReadProgressTracking for LoadProgressTracking {
     ) -> Box<dyn Read> {
         let progress_bar = ProgressBar::new(file_len).with_style(
             ProgressStyle::with_template(
-                "{spinner:.green} [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
+                "{prefix:>10.bold.dim} {spinner:.green} [{bar:.cyan/blue}] {bytes}/{total_bytes} ({percent}%)",
             )
             .unwrap()
             .progress_chars("#>-"),
         );
+        progress_bar.set_prefix("manifest");
         Box::new(LoadProgressTracker {
             rd: progress_bar.wrap_read(rd),
             progress_bar,

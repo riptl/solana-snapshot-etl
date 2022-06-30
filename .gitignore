@@ -2,3 +2,4 @@
 .idea/
 *.tmp
 *.db
+unpacked_snapshot/
