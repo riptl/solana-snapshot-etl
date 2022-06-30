@@ -126,10 +126,16 @@ CREATE TABLE token_multisig (
             "\
 CREATE TABLE token_metadata (
     pubkey BLOB(32) NOT NULL,
+    mint BLOB(32) NOT NULL,
     name TEXT(32) NOT NULL,
     symbol TEXT(10) NOT NULL,
     uri TEXT(200) NOT NULL,
-    seller_fee_basis_points INTEGER(4) NOT NULL
+    seller_fee_basis_points INTEGER(4) NOT NULL,
+    primary_sale_happened INTEGER(1) NOT NULL,
+    is_mutable INTEGER(1) NOT NULL,
+    edition_nonce INTEGER(2) NULL,
+    collection_verified INTEGER(1) NULL,
+    collection_key BLOB(32) NULL
 );",
             [],
         )?;
@@ -264,17 +270,37 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
         if account.data.is_empty() {
             return Ok(());
         }
-        let account_key = match mpl_metadata::AccountKey::try_from(account.data[0]) {
+        let mut data_peek = account.data;
+        let account_key = match mpl_metadata::AccountKey::deserialize(&mut data_peek) {
             Ok(v) => v,
             Err(_) => return Ok(()),
         };
         match account_key {
             mpl_metadata::AccountKey::MetadataV1 => {
-                if let Ok(data) = mpl_metadata::Data::try_from_slice(account.data) {
-                    self.insert_token_metadata_metadata(account, &data)?;
-                }
+                let meta_v1 = mpl_metadata::Metadata::deserialize(&mut data_peek).map_err(|e| {
+                    format!(
+                        "Invalid token-metadata v1 metadata acc {}: {}",
+                        account.meta.pubkey, e
+                    )
+                })?;
+
+                let meta_v1_1 = mpl_metadata::MetadataExt::deserialize(&mut data_peek).ok();
+                let meta_v1_2 = meta_v1_1
+                    .as_ref()
+                    .and_then(|_| mpl_metadata::MetadataExtV1_2::deserialize(&mut data_peek).ok());
+                let meta_v1_3 = meta_v1_2
+                    .as_ref()
+                    .and_then(|_| mpl_metadata::MetadataExtV1_3::deserialize(&mut data_peek).ok());
+
+                self.insert_token_metadata_metadata(
+                    account,
+                    &meta_v1,
+                    meta_v1_1.as_ref(),
+                    meta_v1_2.as_ref(),
+                    meta_v1_3.as_ref(),
+                )?;
             }
-            _ => return Ok(()) // TODO
+            _ => return Ok(()), // TODO
         }
         self.metaplex_accounts_counter.inc();
         Ok(())
@@ -283,20 +309,41 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
     fn insert_token_metadata_metadata(
         &mut self,
         account: &StoredAccountMeta,
-        metadata: &mpl_metadata::Data,
+        meta_v1: &mpl_metadata::Metadata,
+        meta_v1_1: Option<&mpl_metadata::MetadataExt>,
+        meta_v1_2: Option<&mpl_metadata::MetadataExtV1_2>,
+        meta_v1_3: Option<&mpl_metadata::MetadataExtV1_3>,
     ) -> Result<()> {
+        let collection = meta_v1_2.as_ref().and_then(|m| m.collection.as_ref());
         self.db
             .prepare_cached(
                 "\
-INSERT OR REPLACE INTO token_metadata (pubkey, name, symbol, uri, seller_fee_basis_points)
-    VALUES (?, ?, ?, ?, ?);",
+INSERT OR REPLACE INTO token_metadata (
+    pubkey,
+    mint,
+    name,
+    symbol,
+    uri,
+    seller_fee_basis_points,
+    primary_sale_happened,
+    is_mutable,
+    edition_nonce,
+    collection_verified,
+    collection_key
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);",
             )?
             .insert(params![
                 account.meta.pubkey.as_ref(),
-                metadata.name,
-                metadata.symbol,
-                metadata.uri,
-                metadata.seller_fee_basis_points,
+                meta_v1.mint.as_ref(),
+                meta_v1.data.name,
+                meta_v1.data.symbol,
+                meta_v1.data.uri,
+                meta_v1.data.seller_fee_basis_points,
+                meta_v1.primary_sale_happened,
+                meta_v1.is_mutable,
+                meta_v1_1.map(|c| c.edition_nonce),
+                collection.map(|c| c.verified),
+                collection.map(|c| c.key.as_ref()),
             ])?;
         Ok(())
     }
