@@ -7,7 +7,7 @@
 ## Motivation
 
 Solana nodes periodically backup their account database into a `.tar.zst` "snapshot" stream.
-If you run a node yourself, you've probably seen a snapshot file such as this one already: 
+If you run a node yourself, you've probably seen a snapshot file such as this one already:
 
 ```
 snapshot-139240745-D17vR2iksG5RoLMfTX7i5NwSsr4VpbybuX1eqzesQfu2.tar.zst
