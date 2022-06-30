@@ -38,12 +38,16 @@ cd ./unpacked_snapshot
 tar -I zstd -xvf ../snapshot-139240745-D17vR2iksG5RoLMfTX7i5NwSsr4VpbybuX1eqzesQfu2.tar.zst
 ```
 
-Dump all token accounts to SQLite.
+**Dump all token accounts to SQLite.**
 
 ```shell
 cd ../
 ./target/release/solana-snapshot-etl ./unpacked_snapshot --sqlite-out snapshot.db
 ```
+
+**Replicate accounts to a Geyser plugin.**
+
+
 
 ### As a library
 

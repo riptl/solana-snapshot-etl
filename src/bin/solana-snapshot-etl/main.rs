@@ -1,20 +1,26 @@
+use crate::geyser::load_plugin;
 use clap::{ArgGroup, Parser};
 use indicatif::{MultiProgress, ProgressBar, ProgressBarIter, ProgressStyle};
 use log::error;
 use rusqlite::params;
 use serde::Serialize;
+use solana_geyser_plugin_interface::geyser_plugin_interface::{
+    ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
+};
 use solana_sdk::program_pack::Pack;
 use solana_snapshot_etl::{ReadProgressTracking, UnpackedSnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod geyser;
+
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 #[clap(group(
     ArgGroup::new("action")
         .required(true)
-        .args(&["csv", "sqlite-out"]),
+        .args(&["csv", "geyser", "sqlite-out"]),
 ))]
 struct Args {
     #[clap(help = "Path to snapshot")]
@@ -25,6 +31,8 @@ struct Args {
     sqlite_out: String,
     #[clap(long, help = "Index token program data")]
     tokens: bool,
+    #[clap(long, help = "Load Geyser plugin from given config file")]
+    geyser: String,
 }
 
 fn main() {
@@ -53,6 +61,32 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
             if writer.serialize(record).is_err() {
                 std::process::exit(1); // if stdout closes, silently exit
             }
+        }
+    }
+    if !args.geyser.is_empty() {
+        let mut plugin = unsafe { load_plugin(&args.geyser)? };
+        assert!(
+            plugin.account_data_notifications_enabled(),
+            "Geyser plugin does not accept account data notifications"
+        );
+        for account in loader.iter() {
+            let account = account?;
+            let account = account.access().unwrap();
+            let slot = 0u64; // TODO fix slot number
+            plugin.update_account(
+                ReplicaAccountInfoVersions::V0_0_2(&ReplicaAccountInfoV2 {
+                    pubkey: account.meta.pubkey.as_ref(),
+                    lamports: account.account_meta.lamports,
+                    owner: account.account_meta.owner.as_ref(),
+                    executable: account.account_meta.executable,
+                    rent_epoch: account.account_meta.rent_epoch,
+                    data: account.data,
+                    write_version: account.meta.write_version,
+                    txn_signature: None,
+                }),
+                slot,
+                /* is_startup */ false,
+            )?;
         }
     }
     if !args.sqlite_out.is_empty() {
