@@ -47,10 +47,10 @@ fn main() {
 
 fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let loader =
+    let mut loader =
         ArchiveSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
-    let loader =
-        UnpackedSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
+    //let loader =
+    //    UnpackedSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
     if args.csv {
         info!("Dumping to CSV");
         let spinner_style = ProgressStyle::with_template(

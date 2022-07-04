@@ -6,9 +6,11 @@ use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
 use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
+use tar::Entry;
 use thiserror::Error;
 
 pub mod append_vec;
@@ -158,7 +160,8 @@ impl UnpackedSnapshotLoader {
 /// Loads account data from a .tar.zst stream.
 pub struct ArchiveSnapshotLoader {
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
-    archive: tar::Archive<zstd::Decoder<'static, BufReader<File>>>,
+    _archive: Pin<Box<tar::Archive<zstd::Decoder<'static, BufReader<File>>>>>,
+    entries: Option<tar::Entries<'static, zstd::Decoder<'static, BufReader<File>>>>,
 }
 
 impl ArchiveSnapshotLoader {
@@ -182,12 +185,15 @@ impl ArchiveSnapshotLoader {
     fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
         let file = File::open(path)?;
         let tar_stream = zstd::stream::read::Decoder::new(file)?;
-        let mut archive = tar::Archive::new(tar_stream);
-        let file_entries = archive.entries()?;
+        let mut archive = Box::pin(tar::Archive::new(tar_stream));
+
+        // This is safe as long as we guarantee that entries never gets accessed past drop.
+        let archive_static = unsafe { &mut *((&mut *archive) as *mut tar::Archive<_>) };
+        let mut entries = archive_static.entries()?;
 
         // Search for snapshot manifest.
         let mut snapshot_file: Option<tar::Entry<_>> = None;
-        for entry in file_entries {
+        while let Some(entry) = entries.next() {
             let entry = entry?;
             let path = entry.path()?;
             if Self::is_snapshot_manifest_file(&path) {
@@ -225,9 +231,58 @@ impl ArchiveSnapshotLoader {
         );
 
         Ok(ArchiveSnapshotLoader {
-            archive,
+            _archive: archive,
             accounts_db_fields,
+            entries: Some(entries),
         })
+    }
+
+    pub fn iter(&mut self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
+        self.iter_streams()
+            .map_ok(|stream| append_vec_iter(Rc::new(stream)))
+            .flatten_ok()
+    }
+
+    fn iter_streams(&mut self) -> impl Iterator<Item = Result<AppendVec>> + '_ {
+        self.entries
+            .take()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let mut entry = match entry {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e.into())),
+                };
+                let path = match entry.path() {
+                    Ok(x) => x,
+                    Err(e) => return Some(Err(e.into())),
+                };
+                let (slot, id) = path.file_name().and_then(parse_append_vec_name)?;
+                Some(self.process_entry(&mut entry, slot, id))
+            })
+    }
+
+    fn process_entry(
+        &self,
+        entry: &mut Entry<'static, zstd::Decoder<'static, BufReader<File>>>,
+        slot: u64,
+        id: u64,
+    ) -> Result<AppendVec> {
+        let known_vecs = self
+            .accounts_db_fields
+            .0
+            .get(&slot)
+            .map(|v| &v[..])
+            .unwrap_or(&[]);
+        let known_vec = known_vecs.iter().find(|entry| entry.id == (id as usize));
+        let known_vec = match known_vec {
+            None => return Err(SnapshotError::UnexpectedAppendVec),
+            Some(v) => v,
+        };
+        Ok(AppendVec::new_from_reader(
+            entry,
+            known_vec.accounts_current_len,
+        )?)
     }
 
     fn is_snapshot_manifest_file(path: &Path) -> bool {
