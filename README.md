@@ -1,7 +1,5 @@
 # Solana Snapshot ETL 📸
 
-<sub>Built with 🦀 at <em>REDACTED</em></sub>
-
 [![crates.io](https://img.shields.io/crates/v/solana-snapshot-etl?style=flat-square&logo=rust&color=blue)](https://crates.io/crates/solana-snapshot-etl)
 [![docs.rs](https://img.shields.io/badge/docs.rs-solana--snapshot--etl-blue?style=flat-square&logo=docs.rs)](https://docs.rs/solana-snapshot-etl)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square)](#license)

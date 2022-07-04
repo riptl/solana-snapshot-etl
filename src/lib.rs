@@ -38,45 +38,10 @@ pub enum SnapshotError {
     UnexpectedAppendVec,
 }
 
-type Result<T> = std::result::Result<T, SnapshotError>;
+pub type Result<T> = std::result::Result<T, SnapshotError>;
 
-pub enum SnapshotLoader {
-    Unpacked(UnpackedSnapshotLoader),
-    Archive(ArchiveSnapshotLoader),
-}
-
-impl SnapshotLoader {
-    pub fn open<P>(path: P) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        Self::open_inner(path.as_ref(), Box::new(NullReadProgressTracking {}))
-    }
-
-    pub fn open_with_progress<P>(
-        path: P,
-        progress_tracking: Box<dyn ReadProgressTracking>,
-    ) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        Self::open_inner(path.as_ref(), progress_tracking)
-    }
-
-    fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
-        Ok(if path.is_dir() {
-            Self::Unpacked(UnpackedSnapshotLoader::open(path, progress_tracking)?)
-        } else {
-            Self::Archive(ArchiveSnapshotLoader::open(path)?)
-        })
-    }
-
-    pub fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
-        match self {
-            SnapshotLoader::Unpacked(loader) => Box::new(loader.iter()),
-            SnapshotLoader::Archive(loader) => Box::new(loader.iter()),
-        }
-    }
+pub trait SnapshotLoader: Sized {
+    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_>;
 }
 
 /// Loads account data from snapshots that were unarchived to a file system.
@@ -85,8 +50,14 @@ pub struct UnpackedSnapshotLoader {
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
 }
 
+impl SnapshotLoader for UnpackedSnapshotLoader {
+    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
+        Box::new(self.unboxed_iter())
+    }
+}
+
 impl UnpackedSnapshotLoader {
-    fn open(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
+    pub fn open(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
         let snapshots_dir = path.join(SNAPSHOTS_DIR);
         let status_cache = snapshots_dir.join(SNAPSHOT_STATUS_CACHE_FILENAME);
         if !status_cache.is_file() {
@@ -137,7 +108,7 @@ impl UnpackedSnapshotLoader {
         })
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
+    pub fn unboxed_iter(&self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
         std::iter::once(self.iter_streams())
             .flatten_ok()
             .flatten_ok()
@@ -180,16 +151,30 @@ impl UnpackedSnapshotLoader {
 }
 
 /// Loads account data from a .tar.zst stream.
-pub struct ArchiveSnapshotLoader {
+pub struct ArchiveSnapshotLoader<Source>
+where
+    Source: Read + Unpin + 'static,
+{
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
-    _archive: Pin<Box<Archive<zstd::Decoder<'static, BufReader<File>>>>>,
-    entries: Option<Entries<'static, zstd::Decoder<'static, BufReader<File>>>>,
+    _archive: Pin<Box<Archive<zstd::Decoder<'static, BufReader<Source>>>>>,
+    entries: Option<Entries<'static, zstd::Decoder<'static, BufReader<Source>>>>,
 }
 
-impl ArchiveSnapshotLoader {
-    fn open(path: &Path) -> Result<Self> {
-        let file = File::open(path)?;
-        let tar_stream = zstd::stream::read::Decoder::new(file)?;
+impl<Source> SnapshotLoader for ArchiveSnapshotLoader<Source>
+where
+    Source: Read + Unpin + 'static,
+{
+    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
+        Box::new(self.unboxed_iter())
+    }
+}
+
+impl<Source> ArchiveSnapshotLoader<Source>
+where
+    Source: Read + Unpin + 'static,
+{
+    pub fn from_reader(source: Source) -> Result<Self> {
+        let tar_stream = zstd::stream::read::Decoder::new(source)?;
         let mut archive = Box::pin(Archive::new(tar_stream));
 
         // This is safe as long as we guarantee that entries never gets accessed past drop.
@@ -242,7 +227,7 @@ impl ArchiveSnapshotLoader {
         })
     }
 
-    pub fn iter(&mut self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
+    pub fn unboxed_iter(&mut self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
         self.iter_streams()
             .map_ok(|stream| append_vec_iter(Rc::new(stream)))
             .flatten_ok()
@@ -269,7 +254,7 @@ impl ArchiveSnapshotLoader {
 
     fn process_entry(
         &self,
-        entry: &mut Entry<'static, zstd::Decoder<'static, BufReader<File>>>,
+        entry: &mut Entry<'static, zstd::Decoder<'static, BufReader<Source>>>,
         slot: u64,
         id: u64,
     ) -> Result<AppendVec> {
@@ -324,6 +309,12 @@ impl ArchiveSnapshotLoader {
             _ => return false,
         };
         components.next().is_none() && parse_append_vec_name(name).is_some()
+    }
+}
+
+impl ArchiveSnapshotLoader<File> {
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::from_reader(File::open(path)?)
     }
 }
 

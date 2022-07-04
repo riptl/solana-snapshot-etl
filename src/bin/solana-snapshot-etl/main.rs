@@ -3,11 +3,16 @@ use crate::sqlite::SqliteIndexer;
 use clap::{ArgGroup, Parser};
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use log::info;
+use reqwest::blocking::Response;
 use serde::Serialize;
 use solana_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
 };
-use solana_snapshot_etl::{ReadProgressTracking, SnapshotLoader};
+use solana_snapshot_etl::{
+    ArchiveSnapshotLoader, ReadProgressTracking, SnapshotLoader, StoredAccountMetaHandle,
+    UnpackedSnapshotLoader,
+};
+use std::fs::File;
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
 
@@ -47,8 +52,7 @@ fn main() {
 
 fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mut loader =
-        SnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
+    let mut loader = SupportedLoader::new(&args.path, Box::new(LoadProgressTracking {}))?;
     if args.csv {
         info!("Dumping to CSV");
         let spinner_style = ProgressStyle::with_template(
@@ -199,4 +203,55 @@ struct CSVRecord {
     owner: String,
     data_len: u64,
     lamports: u64,
+}
+
+pub enum SupportedLoader {
+    Unpacked(UnpackedSnapshotLoader),
+    ArchiveFile(ArchiveSnapshotLoader<File>),
+    ArchiveDownload(ArchiveSnapshotLoader<Response>),
+}
+
+impl SupportedLoader {
+    fn new(
+        source: &str,
+        progress_tracking: Box<dyn ReadProgressTracking>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if source.starts_with("http://") || source.starts_with("https://") {
+            Self::new_download(source)
+        } else {
+            Self::new_file(source.as_ref(), progress_tracking).map_err(Into::into)
+        }
+    }
+
+    fn new_download(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let resp = reqwest::blocking::get(url)?;
+        let loader = ArchiveSnapshotLoader::from_reader(resp)?;
+        info!("Streaming snapshot from HTTP");
+        Ok(Self::ArchiveDownload(loader))
+    }
+
+    fn new_file(
+        path: &Path,
+        progress_tracking: Box<dyn ReadProgressTracking>,
+    ) -> solana_snapshot_etl::Result<Self> {
+        Ok(if path.is_dir() {
+            info!("Reading unpacked snapshot");
+            Self::Unpacked(UnpackedSnapshotLoader::open(path, progress_tracking)?)
+        } else {
+            info!("Reading snapshot archive");
+            Self::ArchiveFile(ArchiveSnapshotLoader::open(path)?)
+        })
+    }
+}
+
+impl SnapshotLoader for SupportedLoader {
+    fn iter(
+        &mut self,
+    ) -> Box<dyn Iterator<Item = solana_snapshot_etl::Result<StoredAccountMetaHandle>> + '_> {
+        match self {
+            SupportedLoader::Unpacked(loader) => Box::new(loader.iter()),
+            SupportedLoader::ArchiveFile(loader) => Box::new(loader.iter()),
+            SupportedLoader::ArchiveDownload(loader) => Box::new(loader.iter()),
+        }
+    }
 }
