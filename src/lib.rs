@@ -10,7 +10,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
-use tar::Entry;
+use tar::{Archive, Entries, Entry};
 use thiserror::Error;
 
 pub mod append_vec;
@@ -40,13 +40,12 @@ pub enum SnapshotError {
 
 type Result<T> = std::result::Result<T, SnapshotError>;
 
-/// Loads account data from snapshots that were unarchived to a file system.
-pub struct UnpackedSnapshotLoader {
-    root: PathBuf,
-    accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
+pub enum SnapshotLoader {
+    Unpacked(UnpackedSnapshotLoader),
+    Archive(ArchiveSnapshotLoader),
 }
 
-impl UnpackedSnapshotLoader {
+impl SnapshotLoader {
     pub fn open<P>(path: P) -> Result<Self>
     where
         P: AsRef<Path>,
@@ -65,6 +64,29 @@ impl UnpackedSnapshotLoader {
     }
 
     fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
+        Ok(if path.is_dir() {
+            Self::Unpacked(UnpackedSnapshotLoader::open(path, progress_tracking)?)
+        } else {
+            Self::Archive(ArchiveSnapshotLoader::open(path)?)
+        })
+    }
+
+    pub fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
+        match self {
+            SnapshotLoader::Unpacked(loader) => Box::new(loader.iter()),
+            SnapshotLoader::Archive(loader) => Box::new(loader.iter()),
+        }
+    }
+}
+
+/// Loads account data from snapshots that were unarchived to a file system.
+pub struct UnpackedSnapshotLoader {
+    root: PathBuf,
+    accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
+}
+
+impl UnpackedSnapshotLoader {
+    fn open(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
         let snapshots_dir = path.join(SNAPSHOTS_DIR);
         let status_cache = snapshots_dir.join(SNAPSHOT_STATUS_CACHE_FILENAME);
         if !status_cache.is_file() {
@@ -160,40 +182,23 @@ impl UnpackedSnapshotLoader {
 /// Loads account data from a .tar.zst stream.
 pub struct ArchiveSnapshotLoader {
     accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
-    _archive: Pin<Box<tar::Archive<zstd::Decoder<'static, BufReader<File>>>>>,
-    entries: Option<tar::Entries<'static, zstd::Decoder<'static, BufReader<File>>>>,
+    _archive: Pin<Box<Archive<zstd::Decoder<'static, BufReader<File>>>>>,
+    entries: Option<Entries<'static, zstd::Decoder<'static, BufReader<File>>>>,
 }
 
 impl ArchiveSnapshotLoader {
-    pub fn open<P>(path: P) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        Self::open_inner(path.as_ref(), Box::new(NullReadProgressTracking {}))
-    }
-
-    pub fn open_with_progress<P>(
-        path: P,
-        progress_tracking: Box<dyn ReadProgressTracking>,
-    ) -> Result<Self>
-    where
-        P: AsRef<Path>,
-    {
-        Self::open_inner(path.as_ref(), progress_tracking)
-    }
-
-    fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
+    fn open(path: &Path) -> Result<Self> {
         let file = File::open(path)?;
         let tar_stream = zstd::stream::read::Decoder::new(file)?;
-        let mut archive = Box::pin(tar::Archive::new(tar_stream));
+        let mut archive = Box::pin(Archive::new(tar_stream));
 
         // This is safe as long as we guarantee that entries never gets accessed past drop.
-        let archive_static = unsafe { &mut *((&mut *archive) as *mut tar::Archive<_>) };
+        let archive_static = unsafe { &mut *((&mut *archive) as *mut Archive<_>) };
         let mut entries = archive_static.entries()?;
 
         // Search for snapshot manifest.
-        let mut snapshot_file: Option<tar::Entry<_>> = None;
-        while let Some(entry) = entries.next() {
+        let mut snapshot_file: Option<Entry<_>> = None;
+        for entry in entries.by_ref() {
             let entry = entry?;
             let path = entry.path()?;
             if Self::is_snapshot_manifest_file(&path) {
@@ -295,10 +300,10 @@ impl ArchiveSnapshotLoader {
             _ => return false,
         };
         // Check if slot number file is valid u64.
-        if !slot_number_str_1
+        if slot_number_str_1
             .to_str()
             .and_then(|s| s.parse::<u64>().ok())
-            .is_some()
+            .is_none()
         {
             return false;
         }

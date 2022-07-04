@@ -7,7 +7,7 @@ use serde::Serialize;
 use solana_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
 };
-use solana_snapshot_etl::{ArchiveSnapshotLoader, ReadProgressTracking, UnpackedSnapshotLoader};
+use solana_snapshot_etl::{ReadProgressTracking, SnapshotLoader};
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
 
@@ -48,9 +48,7 @@ fn main() {
 fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut loader =
-        ArchiveSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
-    //let loader =
-    //    UnpackedSnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
+        SnapshotLoader::open_with_progress(&args.path, Box::new(LoadProgressTracking {}))?;
     if args.csv {
         info!("Dumping to CSV");
         let spinner_style = ProgressStyle::with_template(
