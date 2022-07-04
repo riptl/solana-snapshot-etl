@@ -1,10 +1,11 @@
 use itertools::Itertools;
 use log::info;
 use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
-use std::ffi::OsString;
+use std::cell::RefCell;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Read};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
@@ -76,7 +77,7 @@ impl UnpackedSnapshotLoader {
             .map(|entry| entry.path().join(entry.file_name()))
             .ok_or(SnapshotError::NoSnapshotManifest)?;
 
-        info!("Opening snapshot manifest: {:?}", &snapshot_file_path);
+        info!("Opening snapshot manifest: {:?}", snapshot_file_path);
         let snapshot_file = OpenOptions::new().read(true).open(&snapshot_file_path)?;
         let snapshot_file_len = snapshot_file.metadata()?.len();
 
@@ -155,7 +156,10 @@ impl UnpackedSnapshotLoader {
 }
 
 /// Loads account data from a .tar.zst stream.
-pub struct ArchiveSnapshotLoader {}
+pub struct ArchiveSnapshotLoader {
+    accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry>,
+    archive: tar::Archive<zstd::Decoder<'static, BufReader<File>>>,
+}
 
 impl ArchiveSnapshotLoader {
     pub fn open<P>(path: P) -> Result<Self>
@@ -175,18 +179,95 @@ impl ArchiveSnapshotLoader {
         Self::open_inner(path.as_ref(), progress_tracking)
     }
 
-    fn open_inner(path: &Path, _progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
+    fn open_inner(path: &Path, progress_tracking: Box<dyn ReadProgressTracking>) -> Result<Self> {
         let file = File::open(path)?;
-        let compressed_stream = BufReader::new(file);
-        let tar_stream = zstd::stream::read::Decoder::new(compressed_stream)?;
-        let mut file_stream = tar::Archive::new(tar_stream);
-        let _file_entries = file_stream.entries()?;
+        let tar_stream = zstd::stream::read::Decoder::new(file)?;
+        let mut archive = tar::Archive::new(tar_stream);
+        let file_entries = archive.entries()?;
 
-        unimplemented!("TODO ArchiveSnapshotLoader");
+        // Search for snapshot manifest.
+        let mut snapshot_file: Option<tar::Entry<_>> = None;
+        for entry in file_entries {
+            let entry = entry?;
+            let path = entry.path()?;
+            if Self::is_snapshot_manifest_file(&path) {
+                snapshot_file = Some(entry);
+                break;
+            } else if Self::is_appendvec_file(&path) {
+                // TODO Support archives where AppendVecs precede snapshot manifests
+                return Err(SnapshotError::UnexpectedAppendVec);
+            }
+        }
+        let snapshot_file = snapshot_file.ok_or(SnapshotError::NoSnapshotManifest)?;
+        //let snapshot_file_len = snapshot_file.size();
+        let snapshot_file_path = snapshot_file.path()?.as_ref().to_path_buf();
+
+        info!("Opening snapshot manifest: {:?}", &snapshot_file_path);
+        let mut snapshot_file = BufReader::new(snapshot_file);
+
+        let pre_unpack = Instant::now();
+        let versioned_bank: DeserializableVersionedBank = deserialize_from(&mut snapshot_file)?;
+        drop(versioned_bank);
+        let versioned_bank_post_time = Instant::now();
+
+        let accounts_db_fields: AccountsDbFields<SerializableAccountStorageEntry> =
+            deserialize_from(&mut snapshot_file)?;
+        let accounts_db_fields_post_time = Instant::now();
+        drop(snapshot_file);
+
+        info!(
+            "Read bank fields in {:?}",
+            versioned_bank_post_time - pre_unpack
+        );
+        info!(
+            "Read accounts DB fields in {:?}",
+            accounts_db_fields_post_time - versioned_bank_post_time
+        );
+
+        Ok(ArchiveSnapshotLoader {
+            archive,
+            accounts_db_fields,
+        })
+    }
+
+    fn is_snapshot_manifest_file(path: &Path) -> bool {
+        let mut components = path.components();
+        if components.next() != Some(Component::Normal("snapshots".as_ref())) {
+            return false;
+        }
+        let slot_number_str_1 = match components.next() {
+            Some(Component::Normal(slot)) => slot,
+            _ => return false,
+        };
+        // Check if slot number file is valid u64.
+        if !slot_number_str_1
+            .to_str()
+            .and_then(|s| s.parse::<u64>().ok())
+            .is_some()
+        {
+            return false;
+        }
+        let slot_number_str_2 = match components.next() {
+            Some(Component::Normal(slot)) => slot,
+            _ => return false,
+        };
+        components.next().is_none() && slot_number_str_1 == slot_number_str_2
+    }
+
+    fn is_appendvec_file(path: &Path) -> bool {
+        let mut components = path.components();
+        if components.next() != Some(Component::Normal("accounts".as_ref())) {
+            return false;
+        }
+        let name = match components.next() {
+            Some(Component::Normal(c)) => c,
+            _ => return false,
+        };
+        components.next().is_none() && parse_append_vec_name(name).is_some()
     }
 }
 
-fn parse_append_vec_name(name: &OsString) -> Option<(u64, u64)> {
+fn parse_append_vec_name(name: &OsStr) -> Option<(u64, u64)> {
     let name = name.to_str()?;
     let mut parts = name.splitn(2, '.');
     let slot = u64::from_str(parts.next().unwrap_or(""));
@@ -244,5 +325,23 @@ struct NullReadProgressTracking {}
 impl ReadProgressTracking for NullReadProgressTracking {
     fn new_read_progress_tracker(&self, _: &Path, rd: Box<dyn Read>, _: u64) -> Box<dyn Read> {
         rd
+    }
+}
+
+struct RefCellRead<T: Read> {
+    rd: RefCell<T>,
+}
+
+impl<T: Read> Read for RefCellRead<T> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.rd
+            .try_borrow_mut()
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "attempted to read archive concurrently",
+                )
+            })
+            .and_then(|mut rd| rd.read(buf))
     }
 }
