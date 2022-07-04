@@ -34,6 +34,8 @@ struct Args {
     csv: bool,
     #[clap(long, help = "Export to new SQLite3 DB at this path")]
     sqlite_out: Option<String>,
+    #[clap(long, help = "SQLite3 cache size in MB")]
+    sqlite_cache_size: Option<i64>,
     #[clap(long, action, help = "Index token program data")]
     tokens: bool,
     #[clap(long, help = "Load Geyser plugin from given config file")]
@@ -133,7 +135,10 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("Refusing to overwrite database that already exists".into());
         }
 
-        let indexer = SqliteIndexer::new(db_path)?;
+        let mut indexer = SqliteIndexer::new(db_path)?;
+        if let Some(cache_size) = args.sqlite_cache_size {
+            indexer.set_cache_size(cache_size)?;
+        }
         let stats = indexer.insert_all(loader.iter())?;
 
         info!(

@@ -75,6 +75,7 @@ solana-snapshot-etl snapshot-139240745-*.tar.zst --sqlite-out snapshot.db
 
 The resulting SQLite database contains the following tables.
 
+- `account`
 - `token_account` (SPL Token Program)
 - `token_mint` (SPL Token Program)
 - `token_multisig` (SPL Token Program)

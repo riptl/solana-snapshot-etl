@@ -86,6 +86,18 @@ impl SqliteIndexer {
         db.pragma_update(None, "locking_mode", "exclusive")?;
         db.execute(
             "\
+CREATE TABLE account  (
+    pubkey BLOB(32) NOT NULL PRIMARY KEY,
+    data_len INTEGER(8) NOT NULL,
+    owner BLOB(32) NOT NULL,
+    lamports INTEGER(8) NOT NULL,
+    executable INTEGER(1) NOT NULL,
+    rent_epoch INTEGER(8) NOT NULL
+);",
+            [],
+        )?;
+        db.execute(
+            "\
 CREATE TABLE token_mint (
     pubkey BLOB(32) NOT NULL PRIMARY KEY,
     mint_authority BLOB(32) NULL,
@@ -142,6 +154,12 @@ CREATE TABLE token_metadata (
         Ok(db)
     }
 
+    pub(crate) fn set_cache_size(&mut self, size_mib: i64) -> Result<()> {
+        let size = size_mib * 1024;
+        self.db.pragma_update(None, "cache_size", -size)?;
+        Ok(())
+    }
+
     pub(crate) fn insert_all<I>(mut self, mut iterator: I) -> Result<IndexStats>
     where
         I: Iterator<Item = std::result::Result<StoredAccountMetaHandle, SnapshotError>>,
@@ -155,6 +173,7 @@ CREATE TABLE token_metadata (
     }
 
     fn finish(mut self) -> Result<IndexStats> {
+        self.db.pragma_update(None, "query_only", true)?;
         let stats = IndexStats {
             accounts_total: self.accounts_counter.counter,
             token_accounts_total: self.token_accounts_counter.counter,
@@ -165,6 +184,7 @@ CREATE TABLE token_metadata (
     }
 
     fn insert_account(&mut self, account: &StoredAccountMeta) -> Result<()> {
+        self.insert_account_meta(account)?;
         if account.account_meta.owner == spl_token::id() {
             self.insert_token(account)?;
         }
@@ -172,6 +192,21 @@ CREATE TABLE token_metadata (
             self.insert_token_metadata(account)?;
         }
         self.accounts_counter.inc();
+        Ok(())
+    }
+
+    fn insert_account_meta(&mut self, account: &StoredAccountMeta) -> Result<()> {
+        let mut account_insert = self.db.prepare_cached("\
+INSERT OR REPLACE INTO account (pubkey, data_len, owner, lamports, executable, rent_epoch)
+    VALUES (?, ?, ?, ?, ?, ?);")?;
+        account_insert.insert(params![
+            account.meta.pubkey.as_ref(),
+            account.meta.data_len as i64,
+            account.account_meta.owner.as_ref(),
+            account.account_meta.lamports as i64,
+            account.account_meta.executable,
+            account.account_meta.rent_epoch as i64,
+        ])?;
         Ok(())
     }
 
