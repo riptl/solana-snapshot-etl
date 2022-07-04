@@ -206,7 +206,7 @@ impl AppendVec {
 
     pub fn new_from_reader<R: Read>(reader: &mut R, current_len: usize) -> io::Result<Self> {
         let mut map = MmapMut::map_anon(current_len)?;
-        io::copy(reader, &mut map.as_mut())?;
+        io::copy(&mut reader.take(current_len as u64), &mut map.as_mut())?;
         Ok(AppendVec {
             map: map.make_read_only()?,
             current_len,
