@@ -28,8 +28,8 @@ mod sqlite;
         .args(&["csv", "geyser", "sqlite-out"]),
 ))]
 struct Args {
-    #[clap(help = "Path to snapshot")]
-    path: String,
+    #[clap(help = "Snapshot source (unpacked snapshot, archive file, or HTTP link)")]
+    source: String,
     #[clap(long, action, help = "Write CSV to stdout")]
     csv: bool,
     #[clap(long, help = "Export to new SQLite3 DB at this path")]
@@ -52,7 +52,7 @@ fn main() {
 
 fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let mut loader = SupportedLoader::new(&args.path, Box::new(LoadProgressTracking {}))?;
+    let mut loader = SupportedLoader::new(&args.source, Box::new(LoadProgressTracking {}))?;
     if args.csv {
         info!("Dumping to CSV");
         let spinner_style = ProgressStyle::with_template(

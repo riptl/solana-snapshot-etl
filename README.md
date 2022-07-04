@@ -20,24 +20,76 @@ A full snapshot file contains a copy of all accounts at a specific slot state (i
 Historical accounts data is relevant to blockchain analytics use-cases and event tracing.
 Despite archives being readily available, the ecosystem was missing an easy-to-use tool to access snapshot data.
 
+## Building
+
+```shell
+cargo install --git https://github.com/terorie/solana-snapshot-etl --features=standalone --bins
+```
+
 ## Usage
 
-The standalone command-line tool can export data to CSV, SQLite3 and Geyser plugins.
+The ETL tool can extract snapshots from a variety of streaming sources
+and load them into one of the supported storage backends.
 
-Build from source.
+The basic command-line usage is as follows:
 
-```shell
-cargo build --release --bin solana-snapshot-etl --features-standalone
+```
+USAGE:
+    solana-snapshot-etl [OPTIONS] <LOAD_FLAGS> <SOURCE>
 ```
 
-**Dump all token accounts to SQLite.**
+### Sources
+
+Extract from a local snapshot file:
 
 ```shell
-./target/release/solana-snapshot-etl snapshot-139240745-*.tar.zst --sqlite-out snapshot.db
+solana-snapshot-etl /path/to/snapshot-*.tar.zst ...
 ```
 
-**Replicate accounts to a Geyser plugin.**
+Extract from an unpacked snapshot:
 
 ```shell
-./target/release/solana-snapshot-etl snapshot-139240745-*.tar.zst --geyser plugin-config.json
+# Example unarchive command
+tar -I zstd -xvf snapshot-*.tar.zst ./unpacked_snapshot/
+
+solana-snapshot-etl ./unpacked_snapshot/
 ```
+
+Stream snapshot from HTTP source or S3 bucket:
+
+```shell
+solana-snapshot-etl 'https://my-solana-node.bdnodes.net/snapshot.tar.zst?auth=xxx' ...
+```
+
+### Targets
+
+#### SQLite3 (recommended)
+
+The fastest way to access snapshot data is the SQLite3 load mechanism.
+
+The resulting SQLite database file can be loaded using any SQLite client library.
+
+```shell
+solana-snapshot-etl snapshot-139240745-*.tar.zst --sqlite-out snapshot.db
+```
+
+The resulting SQLite database contains the following tables.
+
+- `token_account` (SPL Token Program)
+- `token_mint` (SPL Token Program)
+- `token_multisig` (SPL Token Program)
+- `token_metadata` (MPL Metadata Program)
+
+#### CSV
+
+Coming soon!
+
+#### Geyser plugin
+
+Much like `solana-validator`, this tool can write account updates to Geyser plugins.
+
+```shell
+solana-snapshot-etl snapshot-139240745-*.tar.zst --geyser plugin-config.json
+```
+
+For more info, consult Solana's docs: https://docs.solana.com/developing/plugins/geyser-plugins
