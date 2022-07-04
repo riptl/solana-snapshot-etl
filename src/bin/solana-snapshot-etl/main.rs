@@ -56,7 +56,7 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .unwrap();
         let accounts_spinner = ProgressBar::new_spinner()
-            .with_style(spinner_style.clone())
+            .with_style(spinner_style)
             .with_prefix("accs");
         let mut accounts_count = 0u64;
         let mut writer = csv::Writer::from_writer(std::io::stdout());
@@ -93,7 +93,7 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .unwrap();
         let accounts_spinner = ProgressBar::new_spinner()
-            .with_style(spinner_style.clone())
+            .with_style(spinner_style)
             .with_prefix("accs");
         let mut accounts_count = 0u64;
         for account in loader.iter() {
