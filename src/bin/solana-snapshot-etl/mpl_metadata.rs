@@ -39,11 +39,6 @@ pub struct MetadataExtV1_2 {
 }
 
 #[derive(BorshDeserialize)]
-pub struct MetadataExtV1_3 {
-    pub collection_details: Option<CollectionDetails>,
-}
-
-#[derive(BorshDeserialize)]
 pub struct Data {
     pub name: String,
     pub symbol: String,

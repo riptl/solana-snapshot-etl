@@ -288,16 +288,12 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
                 let meta_v1_2 = meta_v1_1
                     .as_ref()
                     .and_then(|_| mpl_metadata::MetadataExtV1_2::deserialize(&mut data_peek).ok());
-                let meta_v1_3 = meta_v1_2
-                    .as_ref()
-                    .and_then(|_| mpl_metadata::MetadataExtV1_3::deserialize(&mut data_peek).ok());
 
                 self.insert_token_metadata_metadata(
                     account,
                     &meta_v1,
                     meta_v1_1.as_ref(),
                     meta_v1_2.as_ref(),
-                    meta_v1_3.as_ref(),
                 )?;
             }
             _ => return Ok(()), // TODO
@@ -312,7 +308,6 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
         meta_v1: &mpl_metadata::Metadata,
         meta_v1_1: Option<&mpl_metadata::MetadataExt>,
         meta_v1_2: Option<&mpl_metadata::MetadataExtV1_2>,
-        meta_v1_3: Option<&mpl_metadata::MetadataExtV1_3>,
     ) -> Result<()> {
         let collection = meta_v1_2.as_ref().and_then(|m| m.collection.as_ref());
         self.db
