@@ -141,10 +141,9 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let stats = indexer.insert_all(loader.iter())?;
 
-        info!(
-            "Done! Wrote {} token accounts out of {} total",
-            stats.token_accounts_total, stats.accounts_total
-        );
+        info!("Done!");
+        info!("Dumped {} accounts", stats.accounts_total);
+        info!("Dumped {} token accounts", stats.token_accounts_total);
     }
     Ok(())
 }
