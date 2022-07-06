@@ -3,10 +3,15 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{error, warn};
 use rusqlite::{params, Connection};
 use solana_sdk::program_pack::Pack;
-use solana_snapshot_etl::append_vec::StoredAccountMeta;
-use solana_snapshot_etl::{SnapshotError, StoredAccountMetaHandle};
-use std::iter::Iterator;
+use solana_snapshot_etl::append_vec::{AppendVec, StoredAccountMeta};
+use solana_snapshot_etl::parallel::{
+    par_iter_append_vecs, AppendVecConsumer, AppendVecConsumerFactory, GenericResult,
+};
+use solana_snapshot_etl::{append_vec_iter, AppendVecIterator};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::mpl_metadata;
 
@@ -15,9 +20,14 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(crate) struct SqliteIndexer {
     db: Connection,
     db_path: PathBuf,
+    db_temp_path: PathBuf,
     db_temp_guard: TempFileGuard,
 
     multi_progress: MultiProgress,
+    progress: Arc<Progress>,
+}
+
+struct Progress {
     accounts_counter: ProgressCounter,
     token_accounts_counter: ProgressCounter,
     metaplex_accounts_counter: ProgressCounter,
@@ -32,12 +42,12 @@ impl SqliteIndexer {
     pub(crate) fn new(db_path: PathBuf) -> Result<Self> {
         // Create temporary DB file, which gets promoted on success.
         let temp_file_name = format!("_{}.tmp", db_path.file_name().unwrap().to_string_lossy());
-        let temp_db_path = db_path.with_file_name(&temp_file_name);
-        let _ = std::fs::remove_file(&temp_db_path);
-        let db_temp_guard = TempFileGuard::new(temp_db_path.clone());
+        let db_temp_path = db_path.with_file_name(&temp_file_name);
+        let _ = std::fs::remove_file(&db_temp_path);
+        let db_temp_guard = TempFileGuard::new(db_temp_path.clone());
 
         // Open database.
-        let db = Self::create_db(&temp_db_path)?;
+        let db = Self::create_db(&db_temp_path)?;
 
         // Create progress bars.
         let spinner_style = ProgressStyle::with_template(
@@ -70,20 +80,22 @@ impl SqliteIndexer {
         Ok(Self {
             db,
             db_path,
+            db_temp_path,
             db_temp_guard,
 
             multi_progress,
-            accounts_counter,
-            token_accounts_counter,
-            metaplex_accounts_counter,
+            progress: Arc::new(Progress {
+                accounts_counter,
+                token_accounts_counter,
+                metaplex_accounts_counter,
+            }),
         })
     }
 
     fn create_db(path: &Path) -> Result<Connection> {
         let db = Connection::open(&path)?;
         db.pragma_update(None, "synchronous", false)?;
-        db.pragma_update(None, "journal_mode", "off")?;
-        db.pragma_update(None, "locking_mode", "exclusive")?;
+        db.pragma_update(None, "journal_mode", "wal")?;
         db.execute(
             "\
 CREATE TABLE account  (
@@ -160,29 +172,58 @@ CREATE TABLE token_metadata (
         Ok(())
     }
 
-    pub(crate) fn insert_all<I>(mut self, mut iterator: I) -> Result<IndexStats>
-    where
-        I: Iterator<Item = std::result::Result<StoredAccountMetaHandle, SnapshotError>>,
-    {
-        iterator.try_for_each(|account| {
-            let account = account?;
-            let account = account.access().unwrap();
-            self.insert_account(&account)
-        })?;
+    pub(crate) fn insert_all(self, iterator: AppendVecIterator) -> Result<IndexStats> {
+        let mut factory = WorkerFactory {
+            db_path: self.db_temp_path.clone(),
+            progress: Arc::clone(&self.progress),
+        };
+        par_iter_append_vecs(iterator, &mut factory, num_cpus::get())?;
         self.finish()
     }
 
     fn finish(mut self) -> Result<IndexStats> {
         self.db.pragma_update(None, "query_only", true)?;
         let stats = IndexStats {
-            accounts_total: self.accounts_counter.counter,
-            token_accounts_total: self.token_accounts_counter.counter,
+            accounts_total: self.progress.accounts_counter.get(),
+            token_accounts_total: self.progress.token_accounts_counter.get(),
         };
         self.db_temp_guard.promote(self.db_path)?;
         let _ = &self.multi_progress;
         Ok(stats)
     }
+}
 
+struct WorkerFactory {
+    db_path: PathBuf,
+    progress: Arc<Progress>,
+}
+
+impl AppendVecConsumerFactory for WorkerFactory {
+    type Consumer = Worker;
+    fn new_consumer(&mut self) -> GenericResult<Self::Consumer> {
+        let db = Connection::open(&self.db_path)?;
+        Ok(Worker {
+            db,
+            progress: Arc::clone(&self.progress),
+        })
+    }
+}
+
+struct Worker {
+    db: Connection,
+    progress: Arc<Progress>,
+}
+
+impl AppendVecConsumer for Worker {
+    fn on_append_vec(&mut self, append_vec: AppendVec) -> GenericResult<()> {
+        for acc in append_vec_iter(Rc::new(append_vec)) {
+            self.insert_account(&acc.access().unwrap())?;
+        }
+        Ok(())
+    }
+}
+
+impl Worker {
     fn insert_account(&mut self, account: &StoredAccountMeta) -> Result<()> {
         self.insert_account_meta(account)?;
         if account.account_meta.owner == spl_token::id() {
@@ -191,7 +232,7 @@ CREATE TABLE token_metadata (
         if account.account_meta.owner == mpl_metadata::id() {
             self.insert_token_metadata(account)?;
         }
-        self.accounts_counter.inc();
+        self.progress.accounts_counter.inc();
         Ok(())
     }
 
@@ -237,7 +278,7 @@ INSERT OR REPLACE INTO account (pubkey, data_len, owner, lamports, executable, r
                 return Ok(());
             }
         }
-        self.token_accounts_counter.inc();
+        self.progress.token_accounts_counter.inc();
         Ok(())
     }
 
@@ -335,7 +376,7 @@ INSERT OR REPLACE INTO token_multisig (pubkey, signer, m, n)
             }
             _ => return Ok(()), // TODO
         }
-        self.metaplex_accounts_counter.inc();
+        self.progress.metaplex_accounts_counter.inc();
         Ok(())
     }
 
@@ -382,30 +423,35 @@ INSERT OR REPLACE INTO token_metadata (
 }
 
 struct ProgressCounter {
-    progress_bar: ProgressBar,
-    counter: u64,
+    progress_bar: Mutex<ProgressBar>,
+    counter: AtomicU64,
 }
 
 impl ProgressCounter {
     fn new(progress_bar: ProgressBar) -> Self {
         Self {
-            progress_bar,
-            counter: 0u64,
+            progress_bar: Mutex::new(progress_bar),
+            counter: AtomicU64::new(0),
         }
     }
 
-    fn inc(&mut self) {
-        self.counter += 1;
-        if self.counter % 1024 == 0 {
-            self.progress_bar.set_position(self.counter)
+    fn get(&self) -> u64 {
+        self.counter.load(Ordering::Relaxed)
+    }
+
+    fn inc(&self) {
+        let count = self.counter.fetch_add(1, Ordering::Relaxed);
+        if count % 1024 == 0 {
+            self.progress_bar.lock().unwrap().set_position(count)
         }
     }
 }
 
 impl Drop for ProgressCounter {
     fn drop(&mut self) {
-        self.progress_bar.set_position(self.counter);
-        self.progress_bar.finish();
+        let progress_bar = self.progress_bar.lock().unwrap();
+        progress_bar.set_position(self.get());
+        progress_bar.finish();
     }
 }
 

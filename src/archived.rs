@@ -1,15 +1,13 @@
 use crate::{
-    append_vec_iter, deserialize_from, parse_append_vec_name, AccountsDbFields, AppendVec,
+    deserialize_from, parse_append_vec_name, AccountsDbFields, AppendVec, AppendVecIterator,
     DeserializableVersionedBank, Result, SerializableAccountStorageEntry, SnapshotError,
-    SnapshotExtractor, StoredAccountMetaHandle,
+    SnapshotExtractor,
 };
-use itertools::Itertools;
 use log::info;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Component, Path};
 use std::pin::Pin;
-use std::rc::Rc;
 use std::time::Instant;
 use tar::{Archive, Entries, Entry};
 
@@ -27,7 +25,7 @@ impl<Source> SnapshotExtractor for ArchiveSnapshotExtractor<Source>
 where
     Source: Read + Unpin + 'static,
 {
-    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
+    fn iter(&mut self) -> AppendVecIterator<'_> {
         Box::new(self.unboxed_iter())
     }
 }
@@ -90,13 +88,7 @@ where
         })
     }
 
-    pub fn unboxed_iter(&mut self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
-        self.iter_streams()
-            .map_ok(|stream| append_vec_iter(Rc::new(stream)))
-            .flatten_ok()
-    }
-
-    fn iter_streams(&mut self) -> impl Iterator<Item = Result<AppendVec>> + '_ {
+    fn unboxed_iter(&mut self) -> impl Iterator<Item = Result<AppendVec>> + '_ {
         self.entries
             .take()
             .into_iter()

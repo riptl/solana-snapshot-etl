@@ -1,22 +1,21 @@
-use crate::geyser::load_plugin;
+use crate::csv::CsvDumper;
+use crate::geyser::GeyserDumper;
+use crate::geyser_plugin::load_plugin;
 use crate::sqlite::SqliteIndexer;
 use clap::{ArgGroup, Parser};
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use log::info;
 use reqwest::blocking::Response;
-use serde::Serialize;
-use solana_geyser_plugin_interface::geyser_plugin_interface::{
-    ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
-};
-use solana_snapshot_etl::{
-    ArchiveSnapshotLoader, ReadProgressTracking, SnapshotExtractor, StoredAccountMetaHandle,
-    UnpackedSnapshotExtractor,
-};
+use solana_snapshot_etl::archived::ArchiveSnapshotExtractor;
+use solana_snapshot_etl::unpacked::UnpackedSnapshotExtractor;
+use solana_snapshot_etl::{AppendVecIterator, ReadProgressTracking, SnapshotExtractor};
 use std::fs::File;
 use std::io::{IoSliceMut, Read};
 use std::path::{Path, PathBuf};
 
+mod csv;
 mod geyser;
+mod geyser_plugin;
 mod mpl_metadata;
 mod sqlite;
 
@@ -57,75 +56,25 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
     let mut loader = SupportedLoader::new(&args.source, Box::new(LoadProgressTracking {}))?;
     if args.csv {
         info!("Dumping to CSV");
-        let spinner_style = ProgressStyle::with_template(
-            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
-        )
-        .unwrap();
-        let accounts_spinner = ProgressBar::new_spinner()
-            .with_style(spinner_style)
-            .with_prefix("accs");
-        let mut accounts_count = 0u64;
-        let mut writer = csv::Writer::from_writer(std::io::stdout());
-        for account in loader.iter() {
-            let account = account?;
-            let account = account.access().unwrap();
-            let record = CSVRecord {
-                pubkey: account.meta.pubkey.to_string(),
-                owner: account.account_meta.owner.to_string(),
-                data_len: account.meta.data_len,
-                lamports: account.account_meta.lamports,
-            };
-            if writer.serialize(record).is_err() {
-                std::process::exit(1); // if stdout closes, silently exit
-            }
-            accounts_count += 1;
-            if accounts_count % 1024 == 0 {
-                accounts_spinner.set_position(accounts_count);
-            }
+        let mut writer = CsvDumper::new();
+        for append_vec in loader.iter() {
+            writer.dump_append_vec(append_vec?);
         }
-        accounts_spinner.finish();
+        drop(writer);
         println!("Done!");
     }
     if let Some(geyser_config_path) = args.geyser {
         info!("Dumping to Geyser plugin: {}", &geyser_config_path);
-        let mut plugin = unsafe { load_plugin(&geyser_config_path)? };
+        let plugin = unsafe { load_plugin(&geyser_config_path)? };
         assert!(
             plugin.account_data_notifications_enabled(),
             "Geyser plugin does not accept account data notifications"
         );
-        // TODO dedup spinner definitions
-        let spinner_style = ProgressStyle::with_template(
-            "{prefix:>10.bold.dim} {spinner} rate={per_sec}/s total={human_pos}",
-        )
-        .unwrap();
-        let accounts_spinner = ProgressBar::new_spinner()
-            .with_style(spinner_style)
-            .with_prefix("accs");
-        let mut accounts_count = 0u64;
-        for account in loader.iter() {
-            let account = account?;
-            let account = account.access().unwrap();
-            let slot = 0u64; // TODO fix slot number
-            plugin.update_account(
-                ReplicaAccountInfoVersions::V0_0_2(&ReplicaAccountInfoV2 {
-                    pubkey: account.meta.pubkey.as_ref(),
-                    lamports: account.account_meta.lamports,
-                    owner: account.account_meta.owner.as_ref(),
-                    executable: account.account_meta.executable,
-                    rent_epoch: account.account_meta.rent_epoch,
-                    data: account.data,
-                    write_version: account.meta.write_version,
-                    txn_signature: None,
-                }),
-                slot,
-                /* is_startup */ false,
-            )?;
-            accounts_count += 1;
-            if accounts_count % 1024 == 0 {
-                accounts_spinner.set_position(accounts_count);
-            }
+        let mut dumper = GeyserDumper::new(plugin);
+        for append_vec in loader.iter() {
+            dumper.dump_append_vec(append_vec?)?;
         }
-        accounts_spinner.finish();
+        drop(dumper);
         println!("Done!");
     }
     if let Some(sqlite_out_path) = args.sqlite_out {
@@ -201,18 +150,10 @@ impl Read for LoadProgressTracker {
     }
 }
 
-#[derive(Serialize)]
-struct CSVRecord {
-    pubkey: String,
-    owner: String,
-    data_len: u64,
-    lamports: u64,
-}
-
 pub enum SupportedLoader {
     Unpacked(UnpackedSnapshotExtractor),
-    ArchiveFile(ArchiveSnapshotLoader<File>),
-    ArchiveDownload(ArchiveSnapshotLoader<Response>),
+    ArchiveFile(ArchiveSnapshotExtractor<File>),
+    ArchiveDownload(ArchiveSnapshotExtractor<Response>),
 }
 
 impl SupportedLoader {
@@ -229,7 +170,7 @@ impl SupportedLoader {
 
     fn new_download(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let resp = reqwest::blocking::get(url)?;
-        let loader = ArchiveSnapshotLoader::from_reader(resp)?;
+        let loader = ArchiveSnapshotExtractor::from_reader(resp)?;
         info!("Streaming snapshot from HTTP");
         Ok(Self::ArchiveDownload(loader))
     }
@@ -243,15 +184,13 @@ impl SupportedLoader {
             Self::Unpacked(UnpackedSnapshotExtractor::open(path, progress_tracking)?)
         } else {
             info!("Reading snapshot archive");
-            Self::ArchiveFile(ArchiveSnapshotLoader::open(path)?)
+            Self::ArchiveFile(ArchiveSnapshotExtractor::open(path)?)
         })
     }
 }
 
 impl SnapshotExtractor for SupportedLoader {
-    fn iter(
-        &mut self,
-    ) -> Box<dyn Iterator<Item = solana_snapshot_etl::Result<StoredAccountMetaHandle>> + '_> {
+    fn iter(&mut self) -> AppendVecIterator<'_> {
         match self {
             SupportedLoader::Unpacked(loader) => Box::new(loader.iter()),
             SupportedLoader::ArchiveFile(loader) => Box::new(loader.iter()),

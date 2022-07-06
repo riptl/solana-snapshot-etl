@@ -12,6 +12,9 @@ pub mod solana;
 pub mod archived;
 pub mod unpacked;
 
+#[cfg(feature = "parallel")]
+pub mod parallel;
+
 use crate::append_vec::{AppendVec, StoredAccountMeta};
 use crate::solana::{
     deserialize_from, AccountsDbFields, DeserializableVersionedBank,
@@ -36,8 +39,10 @@ pub enum SnapshotError {
 
 pub type Result<T> = std::result::Result<T, SnapshotError>;
 
+pub type AppendVecIterator<'a> = Box<dyn Iterator<Item = Result<AppendVec>> + 'a>;
+
 pub trait SnapshotExtractor: Sized {
-    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_>;
+    fn iter(&mut self) -> AppendVecIterator<'_>;
 }
 
 fn parse_append_vec_name(name: &OsStr) -> Option<(u64, u64)> {
@@ -51,7 +56,7 @@ fn parse_append_vec_name(name: &OsStr) -> Option<(u64, u64)> {
     }
 }
 
-fn append_vec_iter(append_vec: Rc<AppendVec>) -> impl Iterator<Item = StoredAccountMetaHandle> {
+pub fn append_vec_iter(append_vec: Rc<AppendVec>) -> impl Iterator<Item = StoredAccountMetaHandle> {
     let mut offsets = Vec::<usize>::new();
     let mut offset = 0usize;
     loop {

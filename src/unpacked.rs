@@ -1,7 +1,7 @@
 use crate::{
-    append_vec_iter, deserialize_from, parse_append_vec_name, AccountsDbFields, AppendVec,
+    deserialize_from, parse_append_vec_name, AccountsDbFields, AppendVec, AppendVecIterator,
     DeserializableVersionedBank, ReadProgressTracking, Result, SerializableAccountStorageEntry,
-    SnapshotError, SnapshotExtractor, StoredAccountMetaHandle, SNAPSHOTS_DIR,
+    SnapshotError, SnapshotExtractor, SNAPSHOTS_DIR,
 };
 use itertools::Itertools;
 use log::info;
@@ -9,7 +9,6 @@ use solana_runtime::snapshot_utils::SNAPSHOT_STATUS_CACHE_FILENAME;
 use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::str::FromStr;
 use std::time::Instant;
 
@@ -20,7 +19,7 @@ pub struct UnpackedSnapshotExtractor {
 }
 
 impl SnapshotExtractor for UnpackedSnapshotExtractor {
-    fn iter(&mut self) -> Box<dyn Iterator<Item = Result<StoredAccountMetaHandle>> + '_> {
+    fn iter(&mut self) -> AppendVecIterator<'_> {
         Box::new(self.unboxed_iter())
     }
 }
@@ -77,11 +76,9 @@ impl UnpackedSnapshotExtractor {
         })
     }
 
-    pub fn unboxed_iter(&self) -> impl Iterator<Item = Result<StoredAccountMetaHandle>> + '_ {
+    pub fn unboxed_iter(&self) -> impl Iterator<Item = Result<AppendVec>> + '_ {
         std::iter::once(self.iter_streams())
             .flatten_ok()
-            .flatten_ok()
-            .map_ok(|stream| append_vec_iter(Rc::new(stream)))
             .flatten_ok()
     }
 
