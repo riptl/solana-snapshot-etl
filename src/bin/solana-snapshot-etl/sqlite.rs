@@ -4,9 +4,7 @@ use log::{error, warn};
 use rusqlite::{params, Connection};
 use solana_sdk::program_pack::Pack;
 use solana_snapshot_etl::append_vec::{AppendVec, StoredAccountMeta};
-use solana_snapshot_etl::parallel::{
-    par_iter_append_vecs, AppendVecConsumer, AppendVecConsumerFactory, GenericResult,
-};
+use solana_snapshot_etl::parallel::{AppendVecConsumer, GenericResult};
 use solana_snapshot_etl::{append_vec_iter, AppendVecIterator};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -20,7 +18,6 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub(crate) struct SqliteIndexer {
     db: Connection,
     db_path: PathBuf,
-    db_temp_path: PathBuf,
     db_temp_guard: TempFileGuard,
 
     multi_progress: MultiProgress,
@@ -80,7 +77,6 @@ impl SqliteIndexer {
         Ok(Self {
             db,
             db_path,
-            db_temp_path,
             db_temp_guard,
 
             multi_progress,
@@ -95,7 +91,8 @@ impl SqliteIndexer {
     fn create_db(path: &Path) -> Result<Connection> {
         let db = Connection::open(&path)?;
         db.pragma_update(None, "synchronous", false)?;
-        db.pragma_update(None, "journal_mode", "wal")?;
+        db.pragma_update(None, "journal_mode", "off")?;
+        db.pragma_update(None, "locking_mode", "exclusive")?;
         db.execute(
             "\
 CREATE TABLE account  (
@@ -172,16 +169,14 @@ CREATE TABLE token_metadata (
         Ok(())
     }
 
-    pub(crate) fn insert_all(self, iterator: AppendVecIterator) -> Result<IndexStats> {
-        let mut factory = WorkerFactory {
-            db_path: self.db_temp_path.clone(),
+    pub(crate) fn insert_all(mut self, iterator: AppendVecIterator) -> Result<IndexStats> {
+        let mut worker = Worker {
+            db: &self.db,
             progress: Arc::clone(&self.progress),
         };
-        par_iter_append_vecs(iterator, &mut factory, num_cpus::get())?;
-        self.finish()
-    }
-
-    fn finish(mut self) -> Result<IndexStats> {
+        for append_vec in iterator {
+            worker.on_append_vec(append_vec?)?;
+        }
         self.db.pragma_update(None, "query_only", true)?;
         let stats = IndexStats {
             accounts_total: self.progress.accounts_counter.get(),
@@ -193,28 +188,12 @@ CREATE TABLE token_metadata (
     }
 }
 
-struct WorkerFactory {
-    db_path: PathBuf,
+struct Worker<'a> {
+    db: &'a Connection,
     progress: Arc<Progress>,
 }
 
-impl AppendVecConsumerFactory for WorkerFactory {
-    type Consumer = Worker;
-    fn new_consumer(&mut self) -> GenericResult<Self::Consumer> {
-        let db = Connection::open(&self.db_path)?;
-        Ok(Worker {
-            db,
-            progress: Arc::clone(&self.progress),
-        })
-    }
-}
-
-struct Worker {
-    db: Connection,
-    progress: Arc<Progress>,
-}
-
-impl AppendVecConsumer for Worker {
+impl<'a> AppendVecConsumer for Worker<'a> {
     fn on_append_vec(&mut self, append_vec: AppendVec) -> GenericResult<()> {
         for acc in append_vec_iter(Rc::new(append_vec)) {
             self.insert_account(&acc.access().unwrap())?;
@@ -223,7 +202,7 @@ impl AppendVecConsumer for Worker {
     }
 }
 
-impl Worker {
+impl<'a> Worker<'a> {
     fn insert_account(&mut self, account: &StoredAccountMeta) -> Result<()> {
         self.insert_account_meta(account)?;
         if account.account_meta.owner == spl_token::id() {
