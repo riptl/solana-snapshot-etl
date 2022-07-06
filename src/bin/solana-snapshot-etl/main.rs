@@ -9,8 +9,8 @@ use solana_geyser_plugin_interface::geyser_plugin_interface::{
     ReplicaAccountInfoV2, ReplicaAccountInfoVersions,
 };
 use solana_snapshot_etl::{
-    ArchiveSnapshotLoader, ReadProgressTracking, SnapshotLoader, StoredAccountMetaHandle,
-    UnpackedSnapshotLoader,
+    ArchiveSnapshotLoader, ReadProgressTracking, SnapshotExtractor, StoredAccountMetaHandle,
+    UnpackedSnapshotExtractor,
 };
 use std::fs::File;
 use std::io::{IoSliceMut, Read};
@@ -210,7 +210,7 @@ struct CSVRecord {
 }
 
 pub enum SupportedLoader {
-    Unpacked(UnpackedSnapshotLoader),
+    Unpacked(UnpackedSnapshotExtractor),
     ArchiveFile(ArchiveSnapshotLoader<File>),
     ArchiveDownload(ArchiveSnapshotLoader<Response>),
 }
@@ -240,7 +240,7 @@ impl SupportedLoader {
     ) -> solana_snapshot_etl::Result<Self> {
         Ok(if path.is_dir() {
             info!("Reading unpacked snapshot");
-            Self::Unpacked(UnpackedSnapshotLoader::open(path, progress_tracking)?)
+            Self::Unpacked(UnpackedSnapshotExtractor::open(path, progress_tracking)?)
         } else {
             info!("Reading snapshot archive");
             Self::ArchiveFile(ArchiveSnapshotLoader::open(path)?)
@@ -248,7 +248,7 @@ impl SupportedLoader {
     }
 }
 
-impl SnapshotLoader for SupportedLoader {
+impl SnapshotExtractor for SupportedLoader {
     fn iter(
         &mut self,
     ) -> Box<dyn Iterator<Item = solana_snapshot_etl::Result<StoredAccountMetaHandle>> + '_> {

@@ -196,9 +196,11 @@ CREATE TABLE token_metadata (
     }
 
     fn insert_account_meta(&mut self, account: &StoredAccountMeta) -> Result<()> {
-        let mut account_insert = self.db.prepare_cached("\
+        let mut account_insert = self.db.prepare_cached(
+            "\
 INSERT OR REPLACE INTO account (pubkey, data_len, owner, lamports, executable, rent_epoch)
-    VALUES (?, ?, ?, ?, ?, ?);")?;
+    VALUES (?, ?, ?, ?, ?, ?);",
+        )?;
         account_insert.insert(params![
             account.meta.pubkey.as_ref(),
             account.meta.data_len as i64,
