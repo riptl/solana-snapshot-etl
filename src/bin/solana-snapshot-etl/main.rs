@@ -5,7 +5,7 @@ use crate::programs::ProgramDumper;
 use crate::sqlite::SqliteIndexer;
 use clap::{ArgGroup, Parser};
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
-use log::info;
+use log::{error, info};
 use reqwest::blocking::Response;
 use solana_snapshot_etl::archived::ArchiveSnapshotExtractor;
 use solana_snapshot_etl::parallel::AppendVecConsumer;
@@ -51,7 +51,7 @@ fn main() {
         env_logger::Env::default().filter_or(env_logger::DEFAULT_FILTER_ENV, "info"),
     );
     if let Err(e) = _main() {
-        eprintln!("{}", e);
+        error!("{}", e);
         std::process::exit(1);
     }
 }

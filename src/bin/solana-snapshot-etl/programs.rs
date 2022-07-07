@@ -37,14 +37,13 @@ impl ProgramDumper {
                 self.write_executable(&account.meta.pubkey, account.data)?;
             }
         } else if bpf_loader_upgradeable::check_id(&account.account_meta.owner) {
-            let mut view = account.data;
             let header: UpgradeableLoaderState = bincode::options()
                 .with_fixint_encoding()
                 .allow_trailing_bytes()
-                .deserialize_from(&mut view)?;
+                .deserialize(account.data)?;
             match header {
                 UpgradeableLoaderState::ProgramData { .. } => {
-                    self.write_executable(&account.meta.pubkey, view)?;
+                    self.write_executable(&account.meta.pubkey, &account.data[45..])?;
                 }
                 _ => {}
             }
@@ -58,7 +57,7 @@ impl ProgramDumper {
         header.set_size(data.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
-        self.builder.append(&mut header, data)?;
+        self.builder.append(&header, data)?;
         Ok(())
     }
 }
