@@ -6,6 +6,7 @@ use solana_geyser_plugin_interface::geyser_plugin_interface::{
 };
 use solana_snapshot_etl::append_vec::{AppendVec, StoredAccountMeta};
 use solana_snapshot_etl::append_vec_iter;
+use solana_snapshot_etl::parallel::{AppendVecConsumer, GenericResult};
 use std::error::Error;
 use std::rc::Rc;
 
@@ -13,6 +14,16 @@ pub(crate) struct GeyserDumper {
     accounts_spinner: ProgressBar,
     plugin: Box<dyn GeyserPlugin>,
     accounts_count: u64,
+}
+
+impl AppendVecConsumer for GeyserDumper {
+    fn on_append_vec(&mut self, append_vec: AppendVec) -> GenericResult<()> {
+        for account in append_vec_iter(Rc::new(append_vec)) {
+            let account = account.access().unwrap();
+            self.dump_account(account)?;
+        }
+        Ok(())
+    }
 }
 
 impl GeyserDumper {
@@ -31,14 +42,6 @@ impl GeyserDumper {
             plugin,
             accounts_count: 0,
         }
-    }
-
-    pub(crate) fn dump_append_vec(&mut self, append_vec: AppendVec) -> Result<(), Box<dyn Error>> {
-        for account in append_vec_iter(Rc::new(append_vec)) {
-            let account = account.access().unwrap();
-            self.dump_account(account)?;
-        }
-        Ok(())
     }
 
     pub(crate) fn dump_account(

@@ -1,22 +1,25 @@
 use crate::csv::CsvDumper;
 use crate::geyser::GeyserDumper;
 use crate::geyser_plugin::load_plugin;
+use crate::programs::ProgramDumper;
 use crate::sqlite::SqliteIndexer;
 use clap::{ArgGroup, Parser};
 use indicatif::{ProgressBar, ProgressBarIter, ProgressStyle};
 use log::info;
 use reqwest::blocking::Response;
 use solana_snapshot_etl::archived::ArchiveSnapshotExtractor;
+use solana_snapshot_etl::parallel::AppendVecConsumer;
 use solana_snapshot_etl::unpacked::UnpackedSnapshotExtractor;
 use solana_snapshot_etl::{AppendVecIterator, ReadProgressTracking, SnapshotExtractor};
-use std::fs::File;
-use std::io::{IoSliceMut, Read};
+use std::fs::{File, OpenOptions};
+use std::io::{stdout, IoSliceMut, Read, Write};
 use std::path::{Path, PathBuf};
 
 mod csv;
 mod geyser;
 mod geyser_plugin;
 mod mpl_metadata;
+mod programs;
 mod sqlite;
 
 #[derive(Parser, Debug)]
@@ -24,7 +27,7 @@ mod sqlite;
 #[clap(group(
     ArgGroup::new("action")
         .required(true)
-        .args(&["csv", "geyser", "sqlite-out"]),
+        .args(&["csv", "geyser", "sqlite-out", "programs-out"]),
 ))]
 struct Args {
     #[clap(help = "Snapshot source (unpacked snapshot, archive file, or HTTP link)")]
@@ -39,6 +42,8 @@ struct Args {
     tokens: bool,
     #[clap(long, help = "Load Geyser plugin from given config file")]
     geyser: Option<String>,
+    #[clap(long, help = "Write programs tar stream")]
+    programs_out: Option<String>,
 }
 
 fn main() {
@@ -72,7 +77,7 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let mut dumper = GeyserDumper::new(plugin);
         for append_vec in loader.iter() {
-            dumper.dump_append_vec(append_vec?)?;
+            dumper.on_append_vec(append_vec?)?;
         }
         drop(dumper);
         println!("Done!");
@@ -93,6 +98,25 @@ fn _main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Done!");
         info!("Dumped {} accounts", stats.accounts_total);
         info!("Dumped {} token accounts", stats.token_accounts_total);
+    }
+    if let Some(programs) = args.programs_out {
+        info!("Dumping program accounts to {}", &programs);
+        let writer: Box<dyn Write> = if programs == "-" {
+            Box::new(stdout())
+        } else {
+            Box::new(
+                OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(programs)?,
+            )
+        };
+        let mut dumper = ProgramDumper::new(writer);
+        for append_vec in loader.iter() {
+            dumper.on_append_vec(append_vec?)?;
+        }
+        drop(dumper);
+        info!("Done!");
     }
     Ok(())
 }
