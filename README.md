@@ -94,3 +94,17 @@ solana-snapshot-etl snapshot-139240745-*.tar.zst --geyser plugin-config.json
 ```
 
 For more info, consult Solana's docs: https://docs.solana.com/developing/plugins/geyser-plugins
+
+#### Dump programs
+
+The `--programs-out` flag exports all Solana programs (in ELF format).
+
+```shell
+solana-snapshot-etl snapshot-139240745-*.tar.zst --programs-out programs.tar
+```
+
+or to extract in place
+
+```shell
+solana-snapshot-etl snapshot-139240745-*.tar.zst --programs-out - | tar -xv
+```
