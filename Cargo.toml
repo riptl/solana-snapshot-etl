@@ -10,7 +10,7 @@ categories = ["cryptography::cryptocurrencies", "database"]
 keywords = ["solana"]
 
 [dependencies]
-clap = { version = "3.2.8", features = ["derive"] }
+clap = { version = "3.2.10", features = ["derive"] }
 log = "0.4.17"
 solana-runtime = "1.11.1"
 thiserror = "1.0.31"
