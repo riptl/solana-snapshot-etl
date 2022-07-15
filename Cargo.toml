@@ -31,7 +31,7 @@ indicatif = { version = "0.17.0-rc.11", optional = true }
 libloading = { version = "0.7.3", optional = true }
 num_cpus = { version = "1.13.1", optional = true }
 reqwest = { version = "0.11.11", features = ["blocking"], optional = true }
-rusqlite = { version = "0.27.0", features = ["bundled"], optional = true }
+rusqlite = { version = "0.28.0", features = ["bundled"], optional = true }
 serde_json = { version = "1.0.82", optional = true }
 solana-geyser-plugin-interface = { version = "1.11.3", optional = true }
 solana-program = { version = "1.11.3", optional = true }
