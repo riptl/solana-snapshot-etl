@@ -22,7 +22,7 @@ jobs:
         with:
           profile: minimal
           toolchain: ${{ matrix.toolchain }}
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - name: Build
         uses: actions-rs/cargo@v1
         with:
@@ -43,7 +43,7 @@ jobs:
           toolchain: nightly
           override: true
       - run: rustup component add rustfmt
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - uses: actions-rs/cargo@v1
         with:
           command: fmt
@@ -60,7 +60,7 @@ jobs:
           toolchain: stable
           override: true
       - run: rustup component add clippy
-      - uses: Swatinem/rust-cache@v1
+      - uses: Swatinem/rust-cache@v2
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
